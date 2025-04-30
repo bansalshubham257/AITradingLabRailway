@@ -28,7 +28,6 @@ class Config:
     NIFTY_EXPIRIES = [
         "2025-04-30"
     ]
-
     # Data collection times with buffer windows (1-3 minutes before and after target times)
     # This ensures cron jobs can trigger within a small window around the desired times
     COMBINED_DATA_COLLECTION_TIMES = [
