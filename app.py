@@ -43,6 +43,10 @@ scanner_service = ScannerService(database_service, option_chain_service)
 def get_all_stocks():
     return jsonify(stock_analysis_service.fetch_all_nse_stocks())
 
+@app.route("/fno-stocks", methods=["GET"])
+def get_all_stocks():
+    return jsonify(option_chain_service.get_fno_stocks_with_symbols())
+
 @app.route("/analyze", methods=["GET"])
 def analyze():
     symbol = request.args.get("symbol")
