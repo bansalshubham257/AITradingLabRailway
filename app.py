@@ -981,7 +981,7 @@ def run_background_workers():
     option_chain_thread.start()
     oi_buildup_thread.start()
     #fiftytwo_week_thread.start()
-    stock_data_thread.start()
+    #stock_data_thread.start()
     #scanner_thread.start()
     #financials_thread.start()
     db_clearing_thread.start()
