@@ -17,7 +17,7 @@ flask-socketio==5.3.4
 python-socketio==5.8.0
 python-engineio==4.5.1
 flask_caching
-git+https://github.com/bretsky/yfinance.git@fix/curl-cffi-cookies
+curl_cffi>=0.7
 yfinance 
 curl-cffi
 eventlet==0.33.3
