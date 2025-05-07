@@ -14,7 +14,6 @@ import numpy as np  # Add this import
 
 from datetime import datetime, date
 import pytz
-from curl_cffi import requests
 import yfinance as yf
 
 # Memory cache for pivot point calculation tracking
@@ -33,7 +32,6 @@ class DatabaseService:
         }
         self.max_retries = max_retries
         self.retry_delay = retry_delay
-        self.session = requests.Session(impersonate="chrome110")
         print("databse init done")
 
     def test_connection(self):
@@ -423,7 +421,7 @@ class DatabaseService:
     def get_anchored_pivot_data(self, ticker, interval):
         """Cache yfinance data for pivot calculations to reduce API calls"""
         try:
-            stock = yf.Ticker(ticker, session=self.session)
+            stock = yf.Ticker(ticker)
 
             # Determine anchor timeframe based on current interval
             if interval in ['5m', '15m']:
