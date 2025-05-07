@@ -18,6 +18,5 @@ python-socketio==5.8.0
 python-engineio==4.5.1
 flask_caching
 curl_cffi>=0.7
-yfinance 
 curl-cffi
 eventlet==0.33.3
