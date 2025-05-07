@@ -12,8 +12,8 @@ class Config:
     # Other configurations
     EXPIRY_DATE = "2025-05-29"
     # Market hours configuration
-    MARKET_OPEN = time(9, 12)  # 09:15 AM
-    MARKET_CLOSE = time(23, 30)  # 03:30 PM
+    MARKET_OPEN = time(0, 1)  # 09:15 AM
+    MARKET_CLOSE = time(23, 59)  # 03:30 PM
     
     # Database clearing time window
     DB_CLEARING_START = time(9, 0)  # 09:00 AM
