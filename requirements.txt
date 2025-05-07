@@ -7,17 +7,17 @@ datetime
 numpy
 redis
 ta
-yfinance
 scipy
 bokeh
 pytz
 # Database
 psycopg2-binary==2.9.9
 python-dotenv==1.0.0
-eventlet==0.33.3
 flask-socketio==5.3.4
 python-socketio==5.8.0
 python-engineio==4.5.1
 flask_caching
 git+https://github.com/bretsky/yfinance.git@fix/curl-cffi-cookies
-curl_cffi
+yfinance==0.2.36
+curl-cffi==0.5.10
+eventlet==0.33.3
