@@ -9,8 +9,8 @@ from bokeh.palettes import Category10
 from decimal import Decimal
 import pytz
 from datetime import datetime, timedelta
-from services.database import DatabaseService  # Import DatabaseService
-from services.option_chain import OptionChainService
+from database import DatabaseService  # Import DatabaseService
+from option_chain import OptionChainService
 import concurrent.futures
 import time
 import requests
