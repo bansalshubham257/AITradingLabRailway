@@ -12,7 +12,7 @@ class Config:
     # Other configurations
     EXPIRY_DATE = "2025-05-29"
     # Market hours configuration
-    MARKET_OPEN = time(9, 12)  # 09:15 AM
+    MARKET_OPEN = time(9, 9)  # 09:15 AM
     MARKET_CLOSE = time(15, 30)  # 03:30 PM
     
     # Post-market window for financial data collection (3:35 PM - 3:39 PM)
