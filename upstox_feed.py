@@ -20,7 +20,6 @@ from queue import Queue, Empty  # Import Empty exception from queue module
 import multiprocessing
 from functools import partial
 
-
 class UpstoxFeedWorker:
     def __init__(self, database_service):
         self.db = database_service
