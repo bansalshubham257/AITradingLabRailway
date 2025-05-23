@@ -8,7 +8,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import threading
 import time
-from services.database import DatabaseService
+from database import DatabaseService
 
 import MarketDataFeed_pb2
 
