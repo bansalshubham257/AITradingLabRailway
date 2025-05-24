@@ -13,7 +13,7 @@ import uvicorn
 from typing import List, Dict, Any, Optional
 
 from config import Config
-from services.database import DatabaseService
+from database import DatabaseService
 import MarketDataFeed_pb2
 
 # FastAPI app setup
