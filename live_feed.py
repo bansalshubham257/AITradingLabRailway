@@ -10,7 +10,7 @@ import threading
 import time
 
 from config import Config
-from services.database import DatabaseService
+from database import DatabaseService
 
 import MarketDataFeed_pb2
 
