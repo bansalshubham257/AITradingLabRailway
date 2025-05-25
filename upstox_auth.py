@@ -825,27 +825,79 @@ def detect_browsers():
     """
     available_browsers = []
     
-    # Check for Chrome
+    # Check for Chrome and Chromium
     chrome_commands = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
     for cmd in chrome_commands:
         try:
-            if subprocess.run(["which", cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0:
+            # Use 'which' on Unix/Linux or 'where' on Windows
+            if sys.platform == "win32":
+                result = subprocess.run(["where", cmd], 
+                                      stdout=subprocess.PIPE, 
+                                      stderr=subprocess.PIPE, 
+                                      text=True,
+                                      shell=True)
+            else:
+                result = subprocess.run(["which", cmd], 
+                                      stdout=subprocess.PIPE, 
+                                      stderr=subprocess.PIPE, 
+                                      text=True)
+            
+            if result.returncode == 0:
                 available_browsers.append("chrome")
                 print(f"Detected Chrome via: {cmd}")
                 break
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error checking for Chrome command '{cmd}': {str(e)}")
     
-    # Check for Firefox
+    # Check for Firefox variants
     firefox_commands = ["firefox", "firefox-esr"]
     for cmd in firefox_commands:
         try:
-            if subprocess.run(["which", cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0:
+            # Use 'which' on Unix/Linux or 'where' on Windows
+            if sys.platform == "win32":
+                result = subprocess.run(["where", cmd], 
+                                      stdout=subprocess.PIPE, 
+                                      stderr=subprocess.PIPE, 
+                                      text=True,
+                                      shell=True)
+            else:
+                result = subprocess.run(["which", cmd], 
+                                      stdout=subprocess.PIPE, 
+                                      stderr=subprocess.PIPE, 
+                                      text=True)
+            
+            if result.returncode == 0:
                 available_browsers.append("firefox")
                 print(f"Detected Firefox via: {cmd}")
                 break
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error checking for Firefox command '{cmd}': {str(e)}")
+    
+    # Also check direct paths for browsers in common locations
+    # This is helpful in Railway and other environments where 'which' might not find the binary
+    browser_paths = {
+        "chrome": [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
+        ],
+        "firefox": [
+            "/usr/bin/firefox",
+            "/usr/bin/firefox-esr",
+            "/snap/bin/firefox",
+        ]
+    }
+    
+    # Check if any of these direct paths exist
+    for browser, paths in browser_paths.items():
+        for path in paths:
+            if os.path.exists(path) and os.access(path, os.X_OK):
+                if browser not in available_browsers:
+                    available_browsers.append(browser)
+                    print(f"Detected {browser} at path: {path}")
+                break
     
     if not available_browsers:
         print("No supported browsers detected on system")
