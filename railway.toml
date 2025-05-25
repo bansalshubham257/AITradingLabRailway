@@ -8,5 +8,5 @@ startCommand = "python generate_token.py --install-deps && python app.py"
 healthcheckPath = "/"
 healthcheckTimeout = 100
 
-[environments]
+[env]
 RAILWAY_ENVIRONMENT = "production"
