@@ -552,6 +552,7 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
                     password_field = wait.until(EC.element_to_be_clickable((By.ID, "pinCode")))
                     password_field.clear()
                     password_field.send_keys(password)
+                    time.sleep(2)
                     signin_button = wait.until(EC.element_to_be_clickable((By.ID, "pinContinueBtn")))
                     signin_button.click()
                     print("Password entered successfully....")
@@ -560,9 +561,12 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
                     print(f"Error entering password: {str(e)}")
                     print("Trying alternative element...")
                     try:
-                        password_field = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@id='otpNum']")))
+                        password_field = wait.until(EC.element_to_be_clickable((By.ID, "pinCode")))
                         password_field.clear()
                         password_field.send_keys(password)
+                        time.sleep(2)
+                        signin_button = wait.until(EC.element_to_be_clickable((By.ID, "pinContinueBtn")))
+                        signin_button.click()
                         print("Password entered using alternative selector")
                     except Exception as alt_e:
                         print(f"Alternative password entry also failed: {str(alt_e)}")
