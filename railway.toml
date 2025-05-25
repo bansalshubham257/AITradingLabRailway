@@ -1,0 +1,12 @@
+# Railway configuration for option-chain-python
+
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python generate_token.py --install-deps && python app.py"
+healthcheckPath = "/"
+healthcheckTimeout = 100
+
+[environments]
+RAILWAY_ENVIRONMENT = "production"
