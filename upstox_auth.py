@@ -13,9 +13,14 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.service import Service as ChromeService
+from webdriver_manager.firefox import GeckoDriverManager
+from selenium.webdriver.firefox.service import Service as FirefoxService
+import subprocess
+import sys
+import platform
 
 class UpstoxAuth:
     """
@@ -415,38 +420,41 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
     print("\n=== Upstox Fully Automated Authentication Flow ===")
     print(f"\nConfiguring automated browser for Upstox login...")
 
+    driver = None
+    
     try:
-        # Set up Chrome options
-        options = webdriver.ChromeOptions()
-        if headless:
-            print("Using headless browser mode")
-            options.add_argument('--headless=new')  # Updated headless syntax for newer Chrome
-            options.add_argument('--disable-extensions')
-        else:
-            print("Using visible browser mode for debugging")
-
-        options.add_argument('--headless=new')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--window-size=1920,1080')
-        options.add_argument('--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-
-        options.binary_location = '/usr/bin/chromium-browser'
-
-        try:
-            # Initialize browser with Service object from ChromeDriverManager
-            print("Launching browser...")
-            service = Service(executable_path='/usr/bin/chromedriver')
-            driver = webdriver.Chrome(service=service, options=options)
-        except Exception as browser_error:
-            print(f"Error initializing Chrome webdriver: {str(browser_error)}")
-            print("Trying alternative initialization method...")
-            # Try alternative initialization method
-            driver = webdriver.Chrome(options=options)
+        # Try multiple browsers in order of preference
+        browsers_to_try = ["chrome", "firefox"]
+        driver = None
+        
+        for browser in browsers_to_try:
+            try:
+                if browser == "chrome":
+                    print("Attempting to initialize Chrome WebDriver...")
+                    driver = setup_chrome_driver(headless)
+                    if driver:
+                        print("Successfully initialized Chrome WebDriver")
+                        break
+                elif browser == "firefox":
+                    print("Attempting to initialize Firefox WebDriver...")
+                    driver = setup_firefox_driver(headless)
+                    if driver:
+                        print("Successfully initialized Firefox WebDriver")
+                        break
+            except Exception as browser_error:
+                print(f"Failed to initialize {browser} driver: {str(browser_error)}")
+                continue
+        
+        if not driver:
+            print("All browser initialization attempts failed. Falling back to manual flow.")
+            auth.stop_auth_server(server)
+            return manual_auth_flow(api_key, secret, totp_secret, redirect_uri)
 
         # Maximize window for better interaction
-        driver.maximize_window()
+        try:
+            driver.maximize_window()
+        except Exception as e:
+            print(f"Warning: Could not maximize window: {str(e)}")
 
         # Set wait timeout
         wait = WebDriverWait(driver, 30)  # Increased timeout for better reliability
@@ -458,7 +466,7 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
         # Small delay to ensure page loads properly
         time.sleep(2)
 
-        # Check if we need username/password
+        # Handle login if credentials provided
         if username and password:
             try:
                 # Handle login form - STEP 1: Enter mobile number/username
@@ -571,8 +579,6 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
                         print(f"Screenshot saved to password_page.png")
                         raise
 
-                # Find and click sign in button
-
             except Exception as login_error:
                 print(f"Error during login process: {str(login_error)}")
                 driver.save_screenshot("login_error.png")
@@ -639,18 +645,214 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
     except Exception as e:
         print(f"Error in automated authentication: {str(e)}")
         try:
-            if 'driver' in locals() and driver:
+            if driver:
                 driver.save_screenshot("error_screenshot.png")
                 print(f"Error screenshot saved to error_screenshot.png")
                 print(f"Current URL at error: {driver.current_url}")
         except Exception as screenshot_error:
             print(f"Failed to take error screenshot: {str(screenshot_error)}")
 
-        if 'server' in locals() and server:
+        if server:
             auth.stop_auth_server(server)
-        if 'driver' in locals() and driver:
-            driver.quit()
-        return None
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
+        
+        # Fall back to manual auth flow
+        print("\nFalling back to manual authentication flow after automated attempt failed.")
+        return manual_auth_flow(api_key, secret, totp_secret, redirect_uri)
+
+def setup_chrome_driver(headless=True):
+    """
+    Set up Chrome WebDriver with multiple fallback methods suitable for Railway and other environments
+    
+    Args:
+        headless (bool): Whether to run in headless mode
+        
+    Returns:
+        WebDriver or None: Initialized Chrome webdriver or None if all methods fail
+    """
+    # Set up Chrome options
+    options = webdriver.ChromeOptions()
+    if headless:
+        print("Using headless browser mode")
+        options.add_argument('--headless=new')  # Updated headless syntax for newer Chrome
+    
+    # Add recommended options for container environments like Railway
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    
+    # Method 1: Try with ChromeDriverManager
+    try:
+        print("Trying ChromeDriverManager method...")
+        service = ChromeService(ChromeDriverManager().install())
+        return webdriver.Chrome(service=service, options=options)
+    except Exception as e:
+        print(f"ChromeDriverManager method failed: {str(e)}")
+    
+    # Method 2: Try with direct initialization (uses PATH)
+    try:
+        print("Trying direct Chrome initialization...")
+        return webdriver.Chrome(options=options)
+    except Exception as e:
+        print(f"Direct Chrome initialization failed: {str(e)}")
+    
+    # Method 3: Try with system-specific paths
+    try:
+        print("Trying system-specific Chrome paths...")
+        # Common Chrome binary locations
+        chrome_paths = []
+        
+        if platform.system() == "Linux":
+            chrome_paths = [
+                "/usr/bin/google-chrome",
+                "/usr/bin/google-chrome-stable",
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser",
+                "/snap/bin/chromium"
+            ]
+        elif platform.system() == "Darwin":  # MacOS
+            chrome_paths = [
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium"
+            ]
+        elif platform.system() == "Windows":
+            chrome_paths = [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+            ]
+        
+        # Try each Chrome binary path
+        for path in chrome_paths:
+            if os.path.exists(path):
+                print(f"Found Chrome at: {path}")
+                options.binary_location = path
+                try:
+                    return webdriver.Chrome(options=options)
+                except Exception as binary_error:
+                    print(f"Failed with binary at {path}: {str(binary_error)}")
+    except Exception as e:
+        print(f"System-specific Chrome paths method failed: {str(e)}")
+    
+    # All Chrome methods failed
+    print("All Chrome initialization methods failed")
+    return None
+
+def setup_firefox_driver(headless=True):
+    """
+    Set up Firefox WebDriver with multiple fallback methods suitable for Railway and other environments
+    
+    Args:
+        headless (bool): Whether to run in headless mode
+        
+    Returns:
+        WebDriver or None: Initialized Firefox webdriver or None if all methods fail
+    """
+    # Set up Firefox options
+    options = webdriver.FirefoxOptions()
+    if headless:
+        print("Using headless Firefox mode")
+        options.add_argument('--headless')
+    
+    # Add recommended options for container environments
+    options.add_argument('--width=1920')
+    options.add_argument('--height=1080')
+    
+    # Method 1: Try with GeckoDriverManager
+    try:
+        print("Trying GeckoDriverManager method...")
+        service = FirefoxService(GeckoDriverManager().install())
+        return webdriver.Firefox(service=service, options=options)
+    except Exception as e:
+        print(f"GeckoDriverManager method failed: {str(e)}")
+    
+    # Method 2: Try direct initialization (uses PATH)
+    try:
+        print("Trying direct Firefox initialization...")
+        return webdriver.Firefox(options=options)
+    except Exception as e:
+        print(f"Direct Firefox initialization failed: {str(e)}")
+    
+    # Method 3: Try with system-specific paths
+    try:
+        print("Trying system-specific Firefox binary paths...")
+        # Common Firefox binary locations
+        firefox_paths = []
+        
+        if platform.system() == "Linux":
+            firefox_paths = [
+                "/usr/bin/firefox",
+                "/usr/bin/firefox-esr",
+                "/snap/bin/firefox"
+            ]
+        elif platform.system() == "Darwin":  # MacOS
+            firefox_paths = [
+                "/Applications/Firefox.app/Contents/MacOS/firefox"
+            ]
+        elif platform.system() == "Windows":
+            firefox_paths = [
+                r"C:\Program Files\Mozilla Firefox\firefox.exe",
+                r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe"
+            ]
+        
+        # Try each Firefox binary path
+        for path in firefox_paths:
+            if os.path.exists(path):
+                print(f"Found Firefox at: {path}")
+                options.binary_location = path
+                try:
+                    return webdriver.Firefox(options=options)
+                except Exception as binary_error:
+                    print(f"Failed with binary at {path}: {str(binary_error)}")
+    except Exception as e:
+        print(f"System-specific Firefox paths method failed: {str(e)}")
+    
+    # All Firefox methods failed
+    print("All Firefox initialization methods failed")
+    return None
+
+def detect_browsers():
+    """
+    Detect which browsers are available on the system
+    
+    Returns:
+        list: List of available browsers ["chrome", "firefox"]
+    """
+    available_browsers = []
+    
+    # Check for Chrome
+    chrome_commands = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
+    for cmd in chrome_commands:
+        try:
+            if subprocess.run(["which", cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0:
+                available_browsers.append("chrome")
+                print(f"Detected Chrome via: {cmd}")
+                break
+        except Exception:
+            pass
+    
+    # Check for Firefox
+    firefox_commands = ["firefox", "firefox-esr"]
+    for cmd in firefox_commands:
+        try:
+            if subprocess.run(["which", cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0:
+                available_browsers.append("firefox")
+                print(f"Detected Firefox via: {cmd}")
+                break
+        except Exception:
+            pass
+    
+    if not available_browsers:
+        print("No supported browsers detected on system")
+    else:
+        print(f"Available browsers: {', '.join(available_browsers)}")
+    
+    return available_browsers
 
 if __name__ == "__main__":
     # This will be executed when running this file directly
@@ -664,4 +866,3 @@ if __name__ == "__main__":
     except (ImportError, AttributeError):
         print("Warning: Config not found or missing credentials, using placeholders")
         api_key = "your_api_key"
-
