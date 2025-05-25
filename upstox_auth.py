@@ -13,25 +13,20 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service as ChromeService
-from webdriver_manager.firefox import GeckoDriverManager
-from selenium.webdriver.firefox.service import Service as FirefoxService
-import subprocess
-import sys
-import platform
+from selenium.webdriver.chrome.service import Service
 
 class UpstoxAuth:
     """
     Utility class for Upstox authentication.
     Generates and manages access tokens using API key and TOTP.
     """
-    
+
     def __init__(self, api_key, secret, totp_secret, redirect_uri):
         """
         Initialize with API credentials.
-        
+
         Args:
             api_key (str): Upstox API key
             secret (str): Upstox API secret
@@ -42,37 +37,37 @@ class UpstoxAuth:
         self.secret = secret
         self.totp_secret = totp_secret
         self.redirect_uri = redirect_uri
-        self.token_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 
+        self.token_file = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                                        "config", "upstox_token.json")
-        
+
     def generate_totp(self):
         """Generate TOTP code for 2FA."""
         totp = pyotp.TOTP(self.totp_secret)
         return totp.now()
-    
+
     def get_auth_url(self):
         """Get the authorization URL for user login."""
         base_url = "https://api.upstox.com/v2/login/authorization/dialog"
         auth_url = f"{base_url}?client_id={self.api_key}&redirect_uri={self.redirect_uri}&response_type=code"
         return auth_url
-    
+
     def get_access_token(self, auth_code):
         """
         Get access token using authorization code.
-        
+
         Args:
             auth_code (str): Authorization code received after user login
-            
+
         Returns:
             dict: Access token response with token and expiry
         """
         url = "https://api.upstox.com/v2/login/authorization/token"
-        
+
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json"
         }
-        
+
         payload = {
             "code": auth_code,
             "client_id": self.api_key,
@@ -80,18 +75,18 @@ class UpstoxAuth:
             "redirect_uri": self.redirect_uri,
             "grant_type": "authorization_code"
         }
-        
+
         response = requests.post(url, headers=headers, data=payload)
         if response.status_code == 200:
             token_data = response.json()
             # Add current timestamp for expiry tracking
             token_data['created_at'] = datetime.now().timestamp()
-            
+
             # Set default expiry if not provided (1 day)
             if 'expires_in' not in token_data:
                 token_data['expires_in'] = 86400  # 24 hours in seconds
                 print("Warning: Token expiry not provided by API, using default (24 hours)")
-            
+
             # Save token to file
             self._save_token(token_data)
             return token_data
@@ -99,35 +94,35 @@ class UpstoxAuth:
             print(f"Error getting access token: {response.status_code}")
             print(response.text)
             return None
-    
+
     def _save_token(self, token_data):
         """Save token data to file."""
         os.makedirs(os.path.dirname(self.token_file), exist_ok=True)
         with open(self.token_file, 'w') as f:
             json.dump(token_data, f, indent=4)
         print(f"Token saved to {self.token_file}")
-    
+
     def get_saved_token(self):
         """Get saved token from file."""
         if os.path.exists(self.token_file):
             with open(self.token_file, 'r') as f:
                 return json.load(f)
         return None
-    
+
     def is_token_valid(self):
         """Check if saved token is valid and not expired."""
         token_data = self.get_saved_token()
         if not token_data:
             return False
-        
+
         # Check if token has expired
         created_at = token_data.get('created_at', 0)
         expires_in = token_data.get('expires_in', 0)
         current_time = datetime.now().timestamp()
-        
+
         # Return True if token is still valid (with 5-minute buffer)
         return current_time < (created_at + expires_in - 300)
-    
+
     def get_valid_token(self):
         """Get a valid access token, either saved or refreshed."""
         if self.is_token_valid():
@@ -138,17 +133,17 @@ class UpstoxAuth:
             # In this case, a new authorization flow is needed
             print("Token expired or not found. Please generate a new token.")
             return None
-    
+
     def verify_token(self, access_token):
         """Verify if the token is valid by making a test API call."""
         headers = {
             "Accept": "application/json",
             "Authorization": f"Bearer {access_token}"
         }
-        
+
         url = "https://api.upstox.com/v2/user/profile"
         response = requests.get(url, headers=headers)
-        
+
         if response.status_code == 200:
             print("Token verification successful!")
             user_data = response.json()
@@ -326,24 +321,24 @@ def automated_auth_flow(api_key, secret, totp_secret, redirect_uri):
 def manual_auth_flow(api_key, secret, totp_secret, redirect_uri):
     """
     Run a manual authentication flow in the console.
-    
+
     Args:
         api_key (str): Upstox API key
         secret (str): Upstox API secret
         totp_secret (str): TOTP secret for 2FA
         redirect_uri (str): Redirect URI registered with Upstox
-        
+
     Returns:
         str: Access token if successful, None otherwise
     """
     auth = UpstoxAuth(api_key, secret, totp_secret, redirect_uri)
-    
+
     # Check if we already have a valid token
     if auth.is_token_valid():
         token_data = auth.get_saved_token()
         print("Using existing valid token")
         return token_data['access_token']
-    
+
     # No valid token, start new flow
     auth_url = auth.get_auth_url()
     print("\n=== Upstox Authentication Flow ===")
@@ -354,34 +349,34 @@ def manual_auth_flow(api_key, secret, totp_secret, redirect_uri):
     print("   The URL will contain a 'code' parameter")
     print(f"\nYour configured redirect URI is: {redirect_uri}")
     print("Make sure this EXACTLY matches what you registered in the Upstox Developer Dashboard")
-    
+
     auth_code = input("\nEnter the code from the redirect URL: ")
-    
+
     # Get access token
     token_data = auth.get_access_token(auth_code)
     if token_data and 'access_token' in token_data:
         print("\nAuthentication successful!")
         access_token = token_data['access_token']
-        
+
         # Verify the token
         user_data = auth.verify_token(access_token)
         if user_data:
             print(f"\nLogged in as: {user_data.get('data', {}).get('user_name', 'Unknown')}")
             print(f"Email: {user_data.get('data', {}).get('email', 'Unknown')}")
-            
+
             # Safely display expiry info
             if 'expires_in' in token_data:
                 hours = token_data['expires_in'] // 3600
                 print(f"\nToken will expire in: {hours} hours")
             else:
                 print("\nToken expiry information not available")
-                
+
             return access_token
-    
+
     return None
 
 def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
-                             headless=True, username=None, password=None):
+                              headless=True, username=None, password=None):
     """
     Run a fully automated authentication flow with Selenium.
 
@@ -420,41 +415,36 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
     print("\n=== Upstox Fully Automated Authentication Flow ===")
     print(f"\nConfiguring automated browser for Upstox login...")
 
-    driver = None
-    
     try:
-        # Try multiple browsers in order of preference
-        browsers_to_try = ["chrome", "firefox"]
-        driver = None
-        
-        for browser in browsers_to_try:
-            try:
-                if browser == "chrome":
-                    print("Attempting to initialize Chrome WebDriver...")
-                    driver = setup_chrome_driver(headless)
-                    if driver:
-                        print("Successfully initialized Chrome WebDriver")
-                        break
-                elif browser == "firefox":
-                    print("Attempting to initialize Firefox WebDriver...")
-                    driver = setup_firefox_driver(headless)
-                    if driver:
-                        print("Successfully initialized Firefox WebDriver")
-                        break
-            except Exception as browser_error:
-                print(f"Failed to initialize {browser} driver: {str(browser_error)}")
-                continue
-        
-        if not driver:
-            print("All browser initialization attempts failed. Falling back to manual flow.")
-            auth.stop_auth_server(server)
-            return manual_auth_flow(api_key, secret, totp_secret, redirect_uri)
+        # Set up Chrome options
+        options = webdriver.ChromeOptions()
+        if headless:
+            print("Using headless browser mode")
+            options.add_argument('--headless=new')  # Updated headless syntax for newer Chrome
+            options.add_argument('--disable-extensions')
+        else:
+            print("Using visible browser mode for debugging")
+
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--window-size=1920,1080')
+        options.add_argument('--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+        try:
+            # Initialize browser with Service object from ChromeDriverManager
+            print("Launching browser...")
+            selenium_url = "standalone-chrome-production-121b.up.railway.app"
+            #service = Service(ChromeDriverManager().install())
+            driver = webdriver.Remote(command_executor=selenium_url, options=options)
+        except Exception as browser_error:
+            print(f"Error initializing Chrome webdriver: {str(browser_error)}")
+            print("Trying alternative initialization method...")
+            # Try alternative initialization method
+            driver = webdriver.Chrome(options=options)
 
         # Maximize window for better interaction
-        try:
-            driver.maximize_window()
-        except Exception as e:
-            print(f"Warning: Could not maximize window: {str(e)}")
+        driver.maximize_window()
 
         # Set wait timeout
         wait = WebDriverWait(driver, 30)  # Increased timeout for better reliability
@@ -466,7 +456,7 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
         # Small delay to ensure page loads properly
         time.sleep(2)
 
-        # Handle login if credentials provided
+        # Check if we need username/password
         if username and password:
             try:
                 # Handle login form - STEP 1: Enter mobile number/username
@@ -579,6 +569,8 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
                         print(f"Screenshot saved to password_page.png")
                         raise
 
+                # Find and click sign in button
+
             except Exception as login_error:
                 print(f"Error during login process: {str(login_error)}")
                 driver.save_screenshot("login_error.png")
@@ -645,266 +637,18 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
     except Exception as e:
         print(f"Error in automated authentication: {str(e)}")
         try:
-            if driver:
+            if 'driver' in locals() and driver:
                 driver.save_screenshot("error_screenshot.png")
                 print(f"Error screenshot saved to error_screenshot.png")
                 print(f"Current URL at error: {driver.current_url}")
         except Exception as screenshot_error:
             print(f"Failed to take error screenshot: {str(screenshot_error)}")
 
-        if server:
+        if 'server' in locals() and server:
             auth.stop_auth_server(server)
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
-        
-        # Fall back to manual auth flow
-        print("\nFalling back to manual authentication flow after automated attempt failed.")
-        return manual_auth_flow(api_key, secret, totp_secret, redirect_uri)
-
-def setup_chrome_driver(headless=True):
-    """
-    Set up Chrome WebDriver with multiple fallback methods suitable for Railway and other environments
-    
-    Args:
-        headless (bool): Whether to run in headless mode
-        
-    Returns:
-        WebDriver or None: Initialized Chrome webdriver or None if all methods fail
-    """
-    # Set up Chrome options
-    options = webdriver.ChromeOptions()
-    if headless:
-        print("Using headless browser mode")
-        options.add_argument('--headless=new')  # Updated headless syntax for newer Chrome
-    
-    # Add recommended options for container environments like Railway
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-gpu')
-    options.add_argument('--window-size=1920,1080')
-    options.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-    
-    # Method 1: Try with ChromeDriverManager
-    try:
-        print("Trying ChromeDriverManager method...")
-        service = ChromeService(ChromeDriverManager().install())
-        return webdriver.Chrome(service=service, options=options)
-    except Exception as e:
-        print(f"ChromeDriverManager method failed: {str(e)}")
-    
-    # Method 2: Try with direct initialization (uses PATH)
-    try:
-        print("Trying direct Chrome initialization...")
-        return webdriver.Chrome(options=options)
-    except Exception as e:
-        print(f"Direct Chrome initialization failed: {str(e)}")
-    
-    # Method 3: Try with system-specific paths
-    try:
-        print("Trying system-specific Chrome paths...")
-        # Common Chrome binary locations
-        chrome_paths = []
-        
-        if platform.system() == "Linux":
-            chrome_paths = [
-                "/usr/bin/google-chrome",
-                "/usr/bin/google-chrome-stable",
-                "/usr/bin/chromium",
-                "/usr/bin/chromium-browser",
-                "/snap/bin/chromium"
-            ]
-        elif platform.system() == "Darwin":  # MacOS
-            chrome_paths = [
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                "/Applications/Chromium.app/Contents/MacOS/Chromium"
-            ]
-        elif platform.system() == "Windows":
-            chrome_paths = [
-                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-            ]
-        
-        # Try each Chrome binary path
-        for path in chrome_paths:
-            if os.path.exists(path):
-                print(f"Found Chrome at: {path}")
-                options.binary_location = path
-                try:
-                    return webdriver.Chrome(options=options)
-                except Exception as binary_error:
-                    print(f"Failed with binary at {path}: {str(binary_error)}")
-    except Exception as e:
-        print(f"System-specific Chrome paths method failed: {str(e)}")
-    
-    # All Chrome methods failed
-    print("All Chrome initialization methods failed")
-    return None
-
-def setup_firefox_driver(headless=True):
-    """
-    Set up Firefox WebDriver with multiple fallback methods suitable for Railway and other environments
-    
-    Args:
-        headless (bool): Whether to run in headless mode
-        
-    Returns:
-        WebDriver or None: Initialized Firefox webdriver or None if all methods fail
-    """
-    # Set up Firefox options
-    options = webdriver.FirefoxOptions()
-    if headless:
-        print("Using headless Firefox mode")
-        options.add_argument('--headless')
-    
-    # Add recommended options for container environments
-    options.add_argument('--width=1920')
-    options.add_argument('--height=1080')
-    
-    # Method 1: Try with GeckoDriverManager
-    try:
-        print("Trying GeckoDriverManager method...")
-        service = FirefoxService(GeckoDriverManager().install())
-        return webdriver.Firefox(service=service, options=options)
-    except Exception as e:
-        print(f"GeckoDriverManager method failed: {str(e)}")
-    
-    # Method 2: Try direct initialization (uses PATH)
-    try:
-        print("Trying direct Firefox initialization...")
-        return webdriver.Firefox(options=options)
-    except Exception as e:
-        print(f"Direct Firefox initialization failed: {str(e)}")
-    
-    # Method 3: Try with system-specific paths
-    try:
-        print("Trying system-specific Firefox binary paths...")
-        # Common Firefox binary locations
-        firefox_paths = []
-        
-        if platform.system() == "Linux":
-            firefox_paths = [
-                "/usr/bin/firefox",
-                "/usr/bin/firefox-esr",
-                "/snap/bin/firefox"
-            ]
-        elif platform.system() == "Darwin":  # MacOS
-            firefox_paths = [
-                "/Applications/Firefox.app/Contents/MacOS/firefox"
-            ]
-        elif platform.system() == "Windows":
-            firefox_paths = [
-                r"C:\Program Files\Mozilla Firefox\firefox.exe",
-                r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe"
-            ]
-        
-        # Try each Firefox binary path
-        for path in firefox_paths:
-            if os.path.exists(path):
-                print(f"Found Firefox at: {path}")
-                options.binary_location = path
-                try:
-                    return webdriver.Firefox(options=options)
-                except Exception as binary_error:
-                    print(f"Failed with binary at {path}: {str(binary_error)}")
-    except Exception as e:
-        print(f"System-specific Firefox paths method failed: {str(e)}")
-    
-    # All Firefox methods failed
-    print("All Firefox initialization methods failed")
-    return None
-
-def detect_browsers():
-    """
-    Detect which browsers are available on the system
-    
-    Returns:
-        list: List of available browsers ["chrome", "firefox"]
-    """
-    available_browsers = []
-    
-    # Check for Chrome and Chromium
-    chrome_commands = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
-    for cmd in chrome_commands:
-        try:
-            # Use 'which' on Unix/Linux or 'where' on Windows
-            if sys.platform == "win32":
-                result = subprocess.run(["where", cmd], 
-                                      stdout=subprocess.PIPE, 
-                                      stderr=subprocess.PIPE, 
-                                      text=True,
-                                      shell=True)
-            else:
-                result = subprocess.run(["which", cmd], 
-                                      stdout=subprocess.PIPE, 
-                                      stderr=subprocess.PIPE, 
-                                      text=True)
-            
-            if result.returncode == 0:
-                available_browsers.append("chrome")
-                print(f"Detected Chrome via: {cmd}")
-                break
-        except Exception as e:
-            print(f"Error checking for Chrome command '{cmd}': {str(e)}")
-    
-    # Check for Firefox variants
-    firefox_commands = ["firefox", "firefox-esr"]
-    for cmd in firefox_commands:
-        try:
-            # Use 'which' on Unix/Linux or 'where' on Windows
-            if sys.platform == "win32":
-                result = subprocess.run(["where", cmd], 
-                                      stdout=subprocess.PIPE, 
-                                      stderr=subprocess.PIPE, 
-                                      text=True,
-                                      shell=True)
-            else:
-                result = subprocess.run(["which", cmd], 
-                                      stdout=subprocess.PIPE, 
-                                      stderr=subprocess.PIPE, 
-                                      text=True)
-            
-            if result.returncode == 0:
-                available_browsers.append("firefox")
-                print(f"Detected Firefox via: {cmd}")
-                break
-        except Exception as e:
-            print(f"Error checking for Firefox command '{cmd}': {str(e)}")
-    
-    # Also check direct paths for browsers in common locations
-    # This is helpful in Railway and other environments where 'which' might not find the binary
-    browser_paths = {
-        "chrome": [
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/snap/bin/chromium",
-        ],
-        "firefox": [
-            "/usr/bin/firefox",
-            "/usr/bin/firefox-esr",
-            "/snap/bin/firefox",
-        ]
-    }
-    
-    # Check if any of these direct paths exist
-    for browser, paths in browser_paths.items():
-        for path in paths:
-            if os.path.exists(path) and os.access(path, os.X_OK):
-                if browser not in available_browsers:
-                    available_browsers.append(browser)
-                    print(f"Detected {browser} at path: {path}")
-                break
-    
-    if not available_browsers:
-        print("No supported browsers detected on system")
-    else:
-        print(f"Available browsers: {', '.join(available_browsers)}")
-    
-    return available_browsers
+        if 'driver' in locals() and driver:
+            driver.quit()
+        return None
 
 if __name__ == "__main__":
     # This will be executed when running this file directly
