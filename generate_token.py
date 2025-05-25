@@ -13,6 +13,8 @@ Options:
   --visible: Run in visible browser mode (for debugging only)
   --manual: Use manual authentication flow instead of automated
   --add-account: Add a new Upstox account to the database
+  --browser: Specify preferred browser (chrome or firefox)
+  --install-deps: Install browser dependencies for Railway deployment
 """
 
 import argparse
@@ -20,8 +22,9 @@ import os
 import getpass
 import logging
 import sys
+import subprocess
 from datetime import datetime
-from upstox_auth import automated_auth_flow, manual_auth_flow, fully_automated_auth_flow
+from upstox_auth import automated_auth_flow, manual_auth_flow, fully_automated_auth_flow, detect_browsers
 from dotenv import load_dotenv
 from config import Config
 from database import DatabaseService
@@ -67,7 +70,36 @@ def add_account():
         print("Failed to save account.")
         return False
 
-def generate_token_for_account(account, headless=True, manual=False):
+def install_browser_dependencies():
+    """Install browser dependencies for Railway deployment"""
+    print("Installing browser dependencies for Railway deployment...")
+    
+    try:
+        # Update package lists
+        subprocess.run(["apt-get", "update"], check=True)
+        
+        # Install Firefox and dependencies
+        subprocess.run([
+            "apt-get", "install", "-y", 
+            "firefox-esr", "wget", "bzip2", "libxtst6", "libgtk-3-0", 
+            "libx11-xcb1", "libdbus-glib-1-2", "libxt6", "libpci3"
+        ], check=True)
+        
+        # Install GeckoDriver
+        subprocess.run([
+            "wget", "https://github.com/mozilla/geckodriver/releases/download/v0.33.0/geckodriver-v0.33.0-linux64.tar.gz"
+        ], check=True)
+        subprocess.run(["tar", "-xzf", "geckodriver-v0.33.0-linux64.tar.gz"], check=True)
+        subprocess.run(["chmod", "+x", "geckodriver"], check=True)
+        subprocess.run(["mv", "geckodriver", "/usr/local/bin/"], check=True)
+        
+        print("Browser dependencies installed successfully!")
+        return True
+    except Exception as e:
+        print(f"Error installing browser dependencies: {str(e)}")
+        return False
+
+def generate_token_for_account(account, headless=True, manual=False, browser=None):
     """Generate a token for a specific account"""
     api_key = account.get('api_key')
     api_secret = account.get('api_secret')
@@ -124,10 +156,21 @@ def main():
     parser.add_argument('--visible', action='store_true', help='Run browser in visible mode (for debugging)')
     parser.add_argument('--manual', action='store_true', help='Use manual flow instead of automated')
     parser.add_argument('--add-account', action='store_true', help='Add a new Upstox account to the database')
+    parser.add_argument('--browser', choices=['chrome', 'firefox'], help='Specify preferred browser to use')
+    parser.add_argument('--install-deps', action='store_true', help='Install browser dependencies for Railway deployment')
     args = parser.parse_args()
     
     # Load environment variables
     load_dotenv()
+    
+    # Install browser dependencies if requested (for Railway)
+    if args.install_deps:
+        if install_browser_dependencies():
+            logging.info("Browser dependencies installed successfully")
+        else:
+            logging.error("Failed to install browser dependencies")
+            sys.exit(1)
+        return
 
     # Add account if requested
     if args.add_account:
@@ -137,6 +180,24 @@ def main():
             logging.error("Failed to add new account")
             sys.exit(1)
         return
+    
+    # Check for Railway environment
+    is_railway = os.environ.get('RAILWAY_ENVIRONMENT') == 'production'
+    if is_railway:
+        logging.info("Detected Railway deployment environment")
+        print("Detected Railway deployment environment")
+        
+        # Force headless mode in Railway
+        headless = True
+        
+        # Detect available browsers in Railway environment
+        available_browsers = detect_browsers()
+        if not available_browsers and not args.manual:
+            logging.warning("No browsers detected in Railway environment, falling back to manual mode")
+            print("No browsers detected in Railway environment, falling back to manual mode")
+            args.manual = True
+    else:
+        headless = not args.visible
     
     # Get accounts from database
     accounts = db_service.get_upstox_accounts()
@@ -149,7 +210,7 @@ def main():
     # Generate tokens for each account
     success_count = 0
     for account in accounts:
-        if generate_token_for_account(account, headless=not args.visible, manual=args.manual):
+        if generate_token_for_account(account, headless=headless, manual=args.manual, browser=args.browser):
             success_count += 1
     
     # Log summary
