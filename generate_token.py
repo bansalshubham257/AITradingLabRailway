@@ -24,7 +24,7 @@ from datetime import datetime
 from upstox_auth import automated_auth_flow, manual_auth_flow, fully_automated_auth_flow
 from dotenv import load_dotenv
 from config import Config
-from services.database import DatabaseService
+from database import DatabaseService
 
 # Configure logging
 logging.basicConfig(
