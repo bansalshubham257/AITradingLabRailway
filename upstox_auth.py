@@ -554,6 +554,7 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
                     password_field.send_keys(password)
                     signin_button = wait.until(EC.element_to_be_clickable((By.ID, "pinContinueBtn")))
                     signin_button.click()
+                    print("Password entered successfully....")
 
                 except Exception as e:
                     print(f"Error entering password: {str(e)}")
@@ -583,11 +584,11 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
             time.sleep(30)
 
         # Small delay before looking for TOTP
-        time.sleep(3)
+        time.sleep(30)
 
 
         # Wait for auth_code to be set by the server (with timeout)
-        timeout = 120  # 2 minutes (increased for reliability)
+        timeout = 180  # 2 minutes (increased for reliability)
         start_time = time.time()
 
         while 'auth_code' not in globals() or globals()['auth_code'] is None:
