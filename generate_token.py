@@ -76,27 +76,87 @@ def install_browser_dependencies():
     
     try:
         # Update package lists
+        print("Updating package lists...")
         subprocess.run(["apt-get", "update"], check=True)
         
-        # Install Firefox and dependencies
-        subprocess.run([
-            "apt-get", "install", "-y", 
-            "firefox-esr", "wget", "bzip2", "libxtst6", "libgtk-3-0", 
-            "libx11-xcb1", "libdbus-glib-1-2", "libxt6", "libpci3"
-        ], check=True)
+        # Try installing Firefox (regular version)
+        print("Attempting to install Firefox...")
+        try:
+            subprocess.run([
+                "apt-get", "install", "-y", "firefox", "wget", "bzip2", 
+                "libxtst6", "libgtk-3-0", "libx11-xcb1", "libdbus-glib-1-2", 
+                "libxt6", "libpci3"
+            ], check=True)
+            print("Firefox installed successfully!")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to install Firefox: {str(e)}")
+            
+            # Try installing Chromium as a fallback
+            print("Attempting to install Chromium as fallback...")
+            try:
+                subprocess.run([
+                    "apt-get", "install", "-y", "chromium-browser", "wget", "bzip2", 
+                    "libxtst6", "libgtk-3-0", "libx11-xcb1", "libdbus-glib-1-2", 
+                    "libxt6", "libpci3"
+                ], check=True)
+                print("Chromium installed successfully!")
+            except subprocess.CalledProcessError as e2:
+                print(f"Failed to install Chromium: {str(e2)}")
+                
+                # Try with add-apt-repository to get Firefox
+                try:
+                    print("Attempting to add Mozilla PPA...")
+                    subprocess.run(["apt-get", "install", "-y", "software-properties-common"], check=True)
+                    subprocess.run(["add-apt-repository", "ppa:mozillateam/ppa", "-y"], check=True)
+                    subprocess.run(["apt-get", "update"], check=True)
+                    subprocess.run(["apt-get", "install", "-y", "firefox"], check=True)
+                    print("Firefox installed from Mozilla PPA!")
+                except subprocess.CalledProcessError as e3:
+                    print(f"Failed to install Firefox from Mozilla PPA: {str(e3)}")
+                    print("Continuing without browser installation. Will try to use existing browsers or fall back to manual mode.")
         
-        # Install GeckoDriver
-        subprocess.run([
-            "wget", "https://github.com/mozilla/geckodriver/releases/download/v0.33.0/geckodriver-v0.33.0-linux64.tar.gz"
-        ], check=True)
-        subprocess.run(["tar", "-xzf", "geckodriver-v0.33.0-linux64.tar.gz"], check=True)
-        subprocess.run(["chmod", "+x", "geckodriver"], check=True)
-        subprocess.run(["mv", "geckodriver", "/usr/local/bin/"], check=True)
+        # Install WebDrivers regardless of which browser was installed
+        print("Installing WebDriver managers...")
+        try:
+            # Install Firefox GeckoDriver
+            print("Installing GeckoDriver...")
+            subprocess.run([
+                "wget", "-q", "https://github.com/mozilla/geckodriver/releases/download/v0.33.0/geckodriver-v0.33.0-linux64.tar.gz"
+            ], check=True)
+            subprocess.run(["tar", "-xzf", "geckodriver-v0.33.0-linux64.tar.gz"], check=True)
+            subprocess.run(["chmod", "+x", "geckodriver"], check=True)
+            subprocess.run(["mv", "geckodriver", "/usr/local/bin/"], check=True)
+            print("GeckoDriver installed!")
+        except Exception as e:
+            print(f"Error installing GeckoDriver: {str(e)}")
         
-        print("Browser dependencies installed successfully!")
-        return True
+        try:
+            # Install ChromeDriver
+            print("Installing ChromeDriver...")
+            subprocess.run([
+                "wget", "-q", "https://chromedriver.storage.googleapis.com/114.0.5735.90/chromedriver_linux64.zip"
+            ], check=True)
+            subprocess.run(["apt-get", "install", "-y", "unzip"], check=True)
+            subprocess.run(["unzip", "chromedriver_linux64.zip"], check=True)
+            subprocess.run(["chmod", "+x", "chromedriver"], check=True)
+            subprocess.run(["mv", "chromedriver", "/usr/local/bin/"], check=True)
+            print("ChromeDriver installed!")
+        except Exception as e:
+            print(f"Error installing ChromeDriver: {str(e)}")
+        
+        # Check which browsers are now available
+        available_browsers = detect_browsers()
+        if available_browsers:
+            print(f"Successfully installed browser(s): {', '.join(available_browsers)}")
+            return True
+        else:
+            print("Warning: No browsers were detected after installation")
+            print("Will fall back to manual authentication mode")
+            return False
+            
     except Exception as e:
-        print(f"Error installing browser dependencies: {str(e)}")
+        print(f"Error during browser dependency installation: {str(e)}")
+        print("Will fall back to manual authentication mode")
         return False
 
 def generate_token_for_account(account, headless=True, manual=False, browser=None):
@@ -168,10 +228,8 @@ def main():
         if install_browser_dependencies():
             logging.info("Browser dependencies installed successfully")
         else:
-            logging.error("Failed to install browser dependencies")
-            sys.exit(1)
-        return
-
+            logging.warning("Failed to install all browser dependencies, continuing anyway")
+    
     # Add account if requested
     if args.add_account:
         if add_account():
