@@ -376,7 +376,7 @@ def manual_auth_flow(api_key, secret, totp_secret, redirect_uri):
     return None
 
 def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
-                             headless=False, username=None, password=None):
+                             headless=True, username=None, password=None):
     """
     Run a fully automated authentication flow with Selenium.
 
