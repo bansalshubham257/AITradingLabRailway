@@ -583,28 +583,31 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
             # Wait for 30 seconds to allow manual login
             time.sleep(30)
 
-        # Small delay before looking for TOTP
-        time.sleep(30)
+        time.sleep(10)
 
 
         # Wait for auth_code to be set by the server (with timeout)
-        timeout = 180  # 2 minutes (increased for reliability)
+        timeout = 120  # 2 minutes timeout
         start_time = time.time()
+        auth_code = None
 
-        while 'auth_code' not in globals() or globals()['auth_code'] is None:
+        while time.time() - start_time < timeout:
+            current_url = driver.current_url
+            if 'code=' in current_url:
+                # Parse the code from URL
+                parsed = urlparse(current_url)
+                params = parse_qs(parsed.query)
+                auth_code = params['code'][0]
+                print(f"\nAuthorization code received: {auth_code}")
+                break
             time.sleep(1)
-            if time.time() - start_time > timeout:
-                print("Authentication timed out. Please try again.")
-                driver.save_screenshot("timeout_error.png")
-                print(f"Screenshot saved to timeout_error.png")
-                print(f"Current URL at timeout: {driver.current_url}")
-                auth.stop_auth_server(server)
-                driver.quit()
-                return None
-
-        # Get the auth code from global variable
-        auth_code = globals()['auth_code']
-        print("\nAuthorization code received automatically!")
+        else:
+            print("Authentication timed out. Please try again.")
+            driver.save_screenshot("timeout_error.png")
+            print(f"Screenshot saved to timeout_error.png")
+            print(f"Final URL: {driver.current_url}")
+            driver.quit()
+            return None
 
         # Close the browser
         driver.quit()
