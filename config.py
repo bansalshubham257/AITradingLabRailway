@@ -24,13 +24,15 @@ class Config:
 
     # Database clearing time window
     DB_CLEARING_START = time(9, 0)  # 09:00 AM
-    DB_CLEARING_END = time(9, 15)  # 09:15 AM
+    DB_CLEARING_END = time(9, 10)  # 09:15 AM
 
     TRADING_DAYS = {0, 1, 2, 3, 4}  # Monday to Friday
 
     SENSEX_EXPIRIES = [
         "2025-06-03",
-        "2025-06-10"
+        "2025-06-10",
+        "2025-06-17",
+        "2025-06-24"
     ]
 
     BANKEX_EXPIRIES = [
@@ -38,10 +40,13 @@ class Config:
     ]
 
     NIFTY_EXPIRIES = [
-        "2025-05-29"
+        "2025-06-05",
+        "2025-06-12",
+        "2025-06-19",
+        "2025-06-26"
     ]
 
     # These should include all relevant expiry dates for different instruments
     INSTRUMENT_EXPIRIES = [
-        "2025-05-29"
+        "2025-06-26"
     ]
