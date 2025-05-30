@@ -621,6 +621,11 @@ CREATE TABLE IF NOT EXISTS stock_earnings (
 
 CREATE INDEX IF NOT EXISTS idx_stock_earnings_date ON stock_earnings(next_earnings_date);
 
+ALTER TABLE options_orders ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'Open';
+
+-- Update any existing rows without status to 'Open'
+UPDATE options_orders SET status = 'Open' WHERE status IS NULL;
+
 ALTER TABLE stock_data_cache
         ADD COLUMN week52_high DECIMAL(20, 4),
         ADD COLUMN week52_low DECIMAL(20, 4),
