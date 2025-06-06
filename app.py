@@ -1408,7 +1408,7 @@ def run_background_workers():
     db_clearing_thread.start()
     #instrument_keys_thread.start()
     #prev_close_thread.start()
-    consolidation_thread.start()
+    #consolidation_thread.start()
     print("Background workers started successfully")
 
     # Keep main thread alive
