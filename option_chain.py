@@ -1866,16 +1866,16 @@ class OptionChainService:
                                                      key=lambda i: abs(weekly_strikes[i] - current_price))
 
                             # Get 5 strikes below, the closest, and 5 strikes above
-                            start_idx = max(0, closest_strike_idx - 4)
-                            end_idx = min(len(weekly_strikes) - 1, closest_strike_idx + 4)
+                            start_idx = max(0, closest_strike_idx - 5)
+                            end_idx = min(len(weekly_strikes) - 1, closest_strike_idx + 5)
 
                             # Select exactly 11 strikes (5 below, 1 at/near, 5 above) if possible
                             selected_weekly_strikes = weekly_strikes[start_idx:end_idx + 1]
 
                             # Ensure we have at most 11 strikes
-                            if len(selected_weekly_strikes) > 9:
+                            if len(selected_weekly_strikes) > 11:
                                 mid_idx = len(selected_weekly_strikes) // 2
-                                selected_weekly_strikes = selected_weekly_strikes[mid_idx - 4:mid_idx + 5]
+                                selected_weekly_strikes = selected_weekly_strikes[mid_idx - 5:mid_idx + 6]
 
                             print(f"{stock} weekly options - current price: {current_price}, selected strikes: {selected_weekly_strikes}")
 
@@ -1917,16 +1917,16 @@ class OptionChainService:
                                                  key=lambda i: abs(all_strikes[i] - current_price))
 
                         # Get 5 strikes below, the closest, and 5 strikes above
-                        start_idx = max(0, closest_strike_idx - 4)
-                        end_idx = min(len(all_strikes) - 1, closest_strike_idx + 4)
+                        start_idx = max(0, closest_strike_idx - 5)
+                        end_idx = min(len(all_strikes) - 1, closest_strike_idx + 5)
 
                         # Select exactly 11 strikes (5 below, 1 at/near, 5 above) if possible
                         selected_strikes = all_strikes[start_idx:end_idx + 1]
 
                         # Ensure we have at most 11 strikes
-                        if len(selected_strikes) > 9:
+                        if len(selected_strikes) > 11:
                             mid_idx = len(selected_strikes) // 2
-                            selected_strikes = selected_strikes[mid_idx - 4:mid_idx + 5]
+                            selected_strikes = selected_strikes[mid_idx - 5:mid_idx + 6]
 
                         #print(f"{stock} monthly options - current price: {current_price}, selected strikes: {selected_strikes}")
 
