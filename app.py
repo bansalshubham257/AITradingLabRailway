@@ -1401,14 +1401,14 @@ def run_background_workers():
 
     #upstox_feed_thread.start()
 
-    option_chain_thread.start()
+    #option_chain_thread.start()
     oi_buildup_thread.start()
     stock_data_thread.start()
     #financials_thread.start()
     db_clearing_thread.start()
     #instrument_keys_thread.start()
     #prev_close_thread.start()
-    #consolidation_thread.start()
+    consolidation_thread.start()
     print("Background workers started successfully")
 
     # Keep main thread alive
