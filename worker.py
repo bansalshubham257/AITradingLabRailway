@@ -1,1162 +1,1106 @@
 import asyncio
 import json
 import ssl
+import uuid
 from datetime import datetime
-
-import requests
-import websockets
-import os
-from google.protobuf.json_format import MessageToDict
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-import threading
 import time
-import uvicorn
-from typing import List, Dict, Any, Optional
+import numpy as np
+from typing import Dict, List, Optional, Tuple
 import concurrent.futures
-
+import requests
+import pandas as pd
+import pytz
+import websockets
+from google.protobuf.json_format import MessageToDict
+import MarketDataFeed_pb2 as pb
 from config import Config
 from database import DatabaseService
-import MarketDataFeed_pb2
+import threading
+from queue import Queue, Empty  # Import Empty exception from queue module
+import multiprocessing
+from functools import partial
 
-# FastAPI app setup
-app = FastAPI()
 
-# CORS configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://swingtradingwithme.blogspot.com",
-        "https://aitradinglab.blogspot.com",
-        "https://www.aitradinglab.in",
-        "https://bansalshubham257.github.io",
-        "http://localhost:63342",
-        "http://localhost:10000",  # Add localhost with port 10000
-        "*"  # Allow all origins for development
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+class UpstoxFeedWorker:
+    def __init__(self, database_service):
+        self.db = database_service
+        # Fetch access tokens from database with different IDs
+        self.access_tokens = []
+        self.access_token_1 = self.db.get_access_token(account_id=1)  # Get first token with ID=1
+        self.access_token_3 = self.db.get_access_token(account_id=3)  # Get second token with ID=3
 
-# Shared data structure
-market_data: Dict[str, Dict[str, Any]] = {}
-active_subscription: List[str] = []
+        if self.access_token_1:
+            print(f"Using first access token ending with ...{self.access_token_1[-4:]} from database (ID=1)")
+            self.access_tokens.append(self.access_token_1)
 
-# Keep track of the current WebSocket connection
-current_websocket = None
-websocket_lock = asyncio.Lock()
-# Track active websocket connections by token
-active_websocket_connections = {}
+        if self.access_token_3:
+            print(f"Using second access token ending with ...{self.access_token_3[-4:]} from database (ID=3)")
+            self.access_tokens.append(self.access_token_3)
 
-db_service = DatabaseService()
+        if not self.access_tokens:
+            print("Warning: No access tokens found in database, falling back to Config")
+            self.access_tokens.append(Config.ACCESS_TOKEN)
+        
+        self.ssl_context = ssl.create_default_context()
+        self.ssl_context.check_hostname = False
+        self.ssl_context.verify_mode = ssl.CERT_NONE
+        self.running = False
 
-def get_market_data_feed_authorize_v3():
-    """Get authorization for market data feed."""
-    # Fetch access token from the database with ID=4 instead of using Config
-    access_token = db_service.get_access_token(account_id=4)
-    print(f"Using access token ending with ...{access_token[-4:]} from database (ID=4)")
+        # Connection settings - Updated for multiple connections
+        self.MAX_CONNECTIONS = 2  # Two connections to handle 6000 instruments
+        self.MAX_KEYS_PER_CONNECTION = 3000  # Maximum of 3000 keys per connection
+        self.RECONNECT_DELAY = 1  # seconds
+        self.CONNECTION_DELAY = 2  # seconds between connections
 
-    # Check if a connection with this token already exists and needs to be closed
-    if access_token in active_websocket_connections:
-        print(f"Found existing websocket connection with token ending ...{access_token[-4:]}")
-        # The actual closing will be handled in close_existing_websocket function
+        # Keep track of connections
+        self.connections = []
+        self.connection_tasks = []
 
-    headers = {'Accept': 'application/json', 'Authorization': f'Bearer {access_token}'}
-    url = 'https://api.upstox.com/v3/feed/market-data-feed/authorize'
-    response = requests.get(url=url, headers=headers)
+        # Processing thresholds
+        self.OPTIONS_THRESHOLD = 87
+        self.FUTURES_THRESHOLD = 36
 
-    # Store token with response data for tracking
-    result = response.json()
-    if 'data' in result and 'authorized_redirect_uri' in result['data']:
-        active_websocket_connections[access_token] = {
-            'uri': result['data']['authorized_redirect_uri'],
-            'websocket': None,
-            'created_at': time.time()
+        # Parallel processing settings
+        self.MAX_WORKERS = 20
+        self.CHUNK_SIZE = 300  # Instruments per processing chunk
+
+        # DB worker pool settings
+        self.DB_WORKERS = min(8, multiprocessing.cpu_count())  # Number of database worker threads
+        self.DB_CHUNK_SIZE = 100  # Number of records per database batch
+        self.db_workers = []
+        self.db_task_queues = []
+        self.db_workers_running = False
+
+        # Data processing pipeline
+        self.data_queue = asyncio.Queue(maxsize=10000)
+        self.processing_task = None
+        self.refresh_request_queue = asyncio.Queue(maxsize=1)
+
+        # Database distribution queue
+        self.db_distribution_queue = Queue(maxsize=10000)
+        self.db_distributor_thread = None
+
+        # Instrument cache and keys
+        self.instrument_cache = {}
+        self.cache_refresh_time = 0
+        self.CACHE_TTL = 3600  # 1 hour cache
+        self.instrument_keys = []  # Store all instrument keys here
+        self.connection_key_batches = []  # Store key batches for each connection
+
+        # Performance monitoring
+        self.last_processed_time = time.time()
+        self.processed_count = 0
+        self.db_stats = {
+            'oi_volume': {'count': 0, 'time': 0},
+            'stock_prices': {'count': 0, 'time': 0},
+            'options': {'count': 0, 'time': 0},
+            'futures': {'count': 0, 'time': 0}
+        }
+        self.last_stats_time = time.time()
+        
+        # Market hours check interval
+        self.MARKET_CHECK_INTERVAL = 60  # Check market hours every 60 seconds
+
+    async def start(self):
+        """Start the feed worker and processing pipeline."""
+        self.running = True
+        self.db_workers_running = True
+
+        # Check if market is open before starting
+        if not self.is_market_open():
+            print("Market is closed. Feed worker will wait until market opens.")
+            await self.wait_for_market_open()
+
+        print("Market is open. Starting feed worker.")
+
+        # Start database worker threads
+        print(f"Starting {self.DB_WORKERS} database worker threads")
+        self._setup_db_workers()
+
+        # Start database distributor thread
+        self.db_distributor_thread = threading.Thread(target=self._db_distributor_thread)
+        self.db_distributor_thread.daemon = True
+        self.db_distributor_thread.start()
+
+        # Fetch instrument keys once at startup in parallel with other tasks
+        fetch_keys_task = asyncio.create_task(self.fetch_instrument_keys())
+        self.processing_task = asyncio.create_task(self._process_queue_continuously())
+
+        # Wait only for keys to be fetched, then start feed
+        await fetch_keys_task
+
+        # Start market hours checker task
+        market_checker_task = asyncio.create_task(self.check_market_hours())
+
+        # Run feed (this will loop until self.running is False)
+        await self.run_feed()
+
+    def is_market_open(self) -> bool:
+        """Check if the market is currently open based on config settings."""
+        now = datetime.now(pytz.timezone('Asia/Kolkata'))
+        current_time = now.time()
+        current_weekday = now.weekday()
+
+        # Check if today is a trading day
+        if current_weekday not in Config.TRADING_DAYS:
+            return False
+
+        # Check if current time is within market hours
+        return Config.MARKET_OPEN <= current_time <= Config.MARKET_CLOSE
+
+    async def wait_for_market_open(self):
+        """Wait until the market opens."""
+        while not self.is_market_open() and self.running:
+            now = datetime.now(pytz.timezone('Asia/Kolkata'))
+            current_time = now.time()
+            current_weekday = now.weekday()
+
+            if current_weekday not in Config.TRADING_DAYS:
+                # Calculate time until next trading day
+                days_until_next = min((day - current_weekday) % 7 for day in Config.TRADING_DAYS)
+                if days_until_next == 0:  # Already past market hours on a trading day
+                    days_until_next = min((day + 7 - current_weekday) % 7 for day in Config.TRADING_DAYS)
+                    
+                print(f"Not a trading day. Waiting until next trading day ({days_until_next} days from now)")
+                await asyncio.sleep(3600)  # Check again in an hour
+            elif current_time < Config.MARKET_OPEN:
+                # Calculate seconds until market open
+                market_open_today = datetime.combine(now.date(), Config.MARKET_OPEN)
+                market_open_today = pytz.timezone('Asia/Kolkata').localize(market_open_today)
+                seconds_until_open = (market_open_today - now).total_seconds()
+                
+                print(f"Market not open yet. Opening in {seconds_until_open/60:.1f} minutes")
+                # Sleep until market opens (with a small buffer)
+                await asyncio.sleep(min(seconds_until_open, 300))
+            else:
+                # Past market close, wait until tomorrow
+                print("Market closed for today. Waiting until next trading day")
+                await asyncio.sleep(3600)  # Check again in an hour
+
+    async def check_market_hours(self):
+        """Periodically check if market is open and stop feed if closed."""
+        while self.running:
+            if not self.is_market_open():
+                print("Market has closed. Stopping feed connections.")
+                # Keep the worker running but stop the connections
+                await self.stop_connections()
+                # Wait for market to open again
+                await self.wait_for_market_open()
+                # Restart feed connections when market opens
+                print("Market has reopened. Restarting feed connections.")
+                # Refresh instrument keys
+                await self.fetch_instrument_keys()
+            
+            # Check market status periodically
+            await asyncio.sleep(self.MARKET_CHECK_INTERVAL)
+
+    async def stop_connections(self):
+        """Stop all feed connections but keep the worker running."""
+        # Cancel all connection tasks if active
+        for task in self.connection_tasks:
+            if task and not task.done():
+                task.cancel()
+
+        # Reset connection state
+        self.connections = []
+        self.connection_tasks = []
+
+        print("All feed connections have been stopped")
+
+    def _setup_db_workers(self):
+        """Setup multiple database worker threads for parallel processing."""
+        for i in range(self.DB_WORKERS):
+            # Create a queue for this worker
+            task_queue = Queue(maxsize=1000)
+            self.db_task_queues.append(task_queue)
+
+            # Create and start a worker thread
+            worker = threading.Thread(
+                target=self._db_worker_thread,
+                args=(i, task_queue)
+            )
+            worker.daemon = True
+            worker.start()
+            self.db_workers.append(worker)
+
+    def _db_distributor_thread(self):
+        """Thread that distributes database tasks to worker threads."""
+        print("Database distributor thread started")
+
+        # Initialize buffers for different data types
+        buffers = {
+            'oi_volume': [],
+            'stock_prices': [],
+            'options': [],
+            'futures': []
         }
 
-    return result, access_token
+        # Define max buffer sizes for different data types
+        max_buffer_sizes = {
+            'oi_volume': self.DB_CHUNK_SIZE * 2,
+            'stock_prices': self.DB_CHUNK_SIZE,
+            'options': self.DB_CHUNK_SIZE,
+            'futures': self.DB_CHUNK_SIZE
+        }
 
-def decode_protobuf(buffer):
-    """Decode protobuf message."""
-    feed_response = MarketDataFeed_pb2.FeedResponse()
-    feed_response.ParseFromString(buffer)
-    return feed_response
+        # Keep track of last flush time for each buffer
+        last_flush_time = {k: time.time() for k in buffers}
+        flush_interval = 1.0  # Max seconds to hold data before flushing
 
-async def close_websocket_by_token(token):
-    """Close WebSocket connection associated with a specific token."""
-    if token in active_websocket_connections:
-        conn_info = active_websocket_connections[token]
-        websocket = conn_info.get('websocket')
-
-        if websocket is not None:
+        while self.db_workers_running:
             try:
-                print(f"Closing existing WebSocket for token ending ...{token[-4:]}")
-                await websocket.close(code=1000, reason="New connection requested")
-                # Wait for connection to fully close
-                await asyncio.sleep(1)
-                print(f"Successfully closed WebSocket for token ending ...{token[-4:]}")
-            except Exception as e:
-                print(f"Error closing WebSocket for token {token[-4:]}: {e}")
-            finally:
-                # Update connection info
-                active_websocket_connections[token]['websocket'] = None
-
-async def close_existing_websocket():
-    """Close any existing WebSocket connection."""
-    global current_websocket
-
-    async with websocket_lock:
-        if current_websocket is not None:
-            try:
-                print("Closing existing WebSocket connection...")
-                await current_websocket.close()
-                # Wait a moment to ensure the connection is fully closed
-                await asyncio.sleep(1)
-                print("Existing WebSocket connection closed successfully")
-            except Exception as e:
-                print(f"Error closing existing WebSocket: {e}")
-            finally:
-                current_websocket = None
-
-async def check_and_close_stale_connections():
-    """Check for stale connections and close them."""
-    now = time.time()
-    tokens_to_check = list(active_websocket_connections.keys())
-
-    for token in tokens_to_check:
-        conn_info = active_websocket_connections[token]
-        websocket = conn_info.get('websocket')
-        created_at = conn_info.get('created_at', 0)
-
-        # If connection is older than 6 hours
-        if now - created_at > 21600:
-            await close_websocket_by_token(token)
-            # Clean up the dictionary to prevent memory leaks
-            del active_websocket_connections[token]
-            print(f"Removed stale connection for token ending ...{token[-4:]}")
-        # Check if websocket is closed using exception-safe method
-        elif websocket is not None:
-            try:
-                # For websockets library, we can send a ping to check if it's still open
-                # If the connection is closed, this will raise an exception
-                pong_waiter = await websocket.ping()
-                await asyncio.wait_for(pong_waiter, timeout=2.0)
-            except Exception:
-                # Connection is dead, clean it up
-                await close_websocket_by_token(token)
-                del active_websocket_connections[token]
-                print(f"Removed closed connection for token ending ...{token[-4:]}")
-
-async def websocket_worker():
-    """Main WebSocket connection handler."""
-    global market_data, active_subscription, current_websocket
-
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-
-    while True:
-        try:
-            # Check and close any stale connections
-            await check_and_close_stale_connections()
-
-            # Close any existing WebSocket connection before creating a new one
-            await close_existing_websocket()
-
-            # Get authorization and token
-            auth, current_token = get_market_data_feed_authorize_v3()
-
-            # Close any existing websocket with this token
-            await close_websocket_by_token(current_token)
-
-            uri = auth["data"]["authorized_redirect_uri"]
-
-            print(f"Connecting to WebSocket at {uri}")
-
-            async with websockets.connect(uri, ssl=ssl_context) as websocket:
-                async with websocket_lock:
-                    current_websocket = websocket
-                    # Store in active connections
-                    if current_token in active_websocket_connections:
-                        active_websocket_connections[current_token]['websocket'] = websocket
-                        active_websocket_connections[current_token]['created_at'] = time.time()
-
-                print("WebSocket connected successfully")
-
-                # Send a ping to make sure the connection is working
+                # Try to get a batch from the queue with a short timeout
                 try:
-                    await websocket.ping()
-                    print("WebSocket ping successful")
+                    batch = self.db_distribution_queue.get(timeout=0.1)
+                except Empty:
+                    # No new data, check if any buffers need time-based flushing
+                    current_time = time.time()
+                    for data_type, buffer in buffers.items():
+                        if buffer and current_time - last_flush_time[data_type] > flush_interval:
+                            self._dispatch_buffer(data_type, buffer)
+                            buffers[data_type] = []
+                            last_flush_time[data_type] = current_time
+                    continue
+
+                batch_type = batch['type']
+                data = batch['data']
+
+                if not data:
+                    self.db_distribution_queue.task_done()
+                    continue
+
+                # Add data to appropriate buffer
+                buffers[batch_type].extend(data)
+
+                # If buffer reaches threshold size, distribute it to a worker
+                if len(buffers[batch_type]) >= max_buffer_sizes[batch_type]:
+                    self._dispatch_buffer(batch_type, buffers[batch_type])
+                    buffers[batch_type] = []
+                    last_flush_time[batch_type] = time.time()
+
+                self.db_distribution_queue.task_done()
+
+            except Exception as e:
+                print(f"Error in database distributor thread: {e}")
+                time.sleep(0.1)
+
+        # Flush any remaining data before shutting down
+        for data_type, buffer in buffers.items():
+            if buffer:
+                try:
+                    self._dispatch_buffer(data_type, buffer)
                 except Exception as e:
-                    print(f"WebSocket ping failed: {e}")
-                    raise
+                    print(f"Error flushing buffer {data_type} during shutdown: {e}")
 
-                # Initialize a local subscription list to track what we've already subscribed to
-                local_subscribed = []
+        print("Database distributor thread stopped")
 
-                while True:
-                    # Only send subscription if there are new instruments in active_subscription
-                    subscription_to_send = [item for item in active_subscription if item not in local_subscribed]
+    def _dispatch_buffer(self, data_type, buffer):
+        """Dispatch a buffer to the least busy worker thread."""
+        if not buffer:
+            return
 
-                    if subscription_to_send:
-                        print(f"New subscription requested: {subscription_to_send}")
-                        subscription_data = {
-                            "guid": str(time.time()),
-                            "method": "sub",
-                            "data": {
-                                "mode": "full",
-                                "instrumentKeys": subscription_to_send
-                            }
-                        }
-                        print(f"Sending subscription request for {len(subscription_to_send)} instruments...")
-                        await websocket.send(json.dumps(subscription_data).encode('utf-8'))
+        # Find the worker with the smallest queue
+        min_size = float('inf')
+        min_index = 0
 
-                        # Add these instruments to our local tracking
-                        local_subscribed.extend(subscription_to_send)
-                        print(f"Total subscribed instruments: {len(local_subscribed)}")
+        for i, queue in enumerate(self.db_task_queues):
+            size = queue.qsize()
+            if size < min_size:
+                min_size = size
+                min_index = i
 
-                    try:
-                        message = await asyncio.wait_for(websocket.recv(), timeout=5)
-                        decoded = decode_protobuf(message)
-                        data = MessageToDict(decoded)
-                        for instrument, feed in data.get("feeds", {}).items():
-                            full_feed = feed.get("fullFeed", {})
-                            market_ff = full_feed.get("marketFF", {})
-                            index_ff = full_feed.get("indexFF", {})
-
-                            ltpc = market_ff.get("ltpc", index_ff.get("ltpc", {}))
-                            oi = market_ff.get("oi", 0)
-
-                            volume = 0
-                            market_ohlc = market_ff.get("marketOHLC", {}).get("ohlc", [])
-                            if market_ohlc:
-                                for ohlc_data in market_ohlc:
-                                    if ohlc_data.get("interval") == "1d":
-                                        volume = int(ohlc_data.get("vol", 0))
-                                        break
-                                if volume == 0 and market_ohlc:
-                                    volume = int(market_ohlc[0].get("vol", 0))
-                            if volume == 0:
-                                volume = int(market_ff.get("vtt", 0))
-
-                            bid_ask_quote = market_ff.get("marketLevel", {}).get("bidAskQuote", [{}])
-                            bidQ = bid_ask_quote[0].get("bidQ", 0) if bid_ask_quote else 0
-                            askQ = bid_ask_quote[0].get("askQ", 0) if bid_ask_quote else 0
-
-                            market_data[instrument] = {
-                                "ltp": ltpc.get("ltp"),
-                                "volume": volume,
-                                "oi": oi,
-                                "bidQ": bidQ,
-                                "askQ": askQ
-                            }
-                    except asyncio.TimeoutError:
-                        # Send a heartbeat to keep the connection alive
-                        try:
-                            await websocket.ping()
-                        except Exception as e:
-                            print(f"Heartbeat ping failed: {e}")
-                            raise  # Re-raise to trigger reconnection
-                    except Exception as e:
-                        print(f"WebSocket connection error: {e}")
-                        raise  # Re-raise to trigger reconnection
-
-        except Exception as e:
-            print(f"Connection error: {e}, reconnecting in 5 seconds...")
-
-            # Make sure to clean up the current websocket reference
-            async with websocket_lock:
-                current_websocket = None
-
-            await asyncio.sleep(5)
-
-@app.get("/api/market_data")
-async def get_market_data(request: Request):
-    """Fetch and return market data for requested instruments."""
-    global active_subscription
-
-    requested_keys = request.query_params.getlist('keys')
-    if not requested_keys:
-        raise HTTPException(status_code=400, detail="No keys specified")
-
-    # Add new instruments to the active_subscription list
-    new_instruments = [key for key in requested_keys if key not in active_subscription]
-    if new_instruments:
-        active_subscription.extend(new_instruments)
-        print(f"Added {len(new_instruments)} new instruments to subscription: {new_instruments}")
-
-    timeout = 30
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        if all(key in market_data for key in requested_keys):
-            break
-        time.sleep(0.5)
-
-    return {key: market_data.get(key, {}) for key in requested_keys}
-
-@app.get("/api/live_indices")
-async def get_live_indices():
-    """Fetch live data for static indices."""
-    global active_subscription
-
-    static_indices = {
-        "NIFTY": "NSE_INDEX|Nifty 50",
-        "BANKNIFTY": "NSE_INDEX|Nifty Bank",
-        "MIDCPNIFTY": "NSE_INDEX|Nifty Midcap 50",
-        "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
-        "SENSEX": "BSE_INDEX|SENSEX",
-        "BANKEX": "BSE_INDEX|BANKEX"
-    }
-
-    active_subscription = list(static_indices.values())
-
-    timeout = 30
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        if all(key in market_data for key in active_subscription):
-            break
-        time.sleep(0.5)
-
-    indices = []
-    for index, key in static_indices.items():
-        data = market_data.get(key, {})
-        ltp = data.get("ltp", 0) or 0
-
-        instrument = db_service.get_instrument_key_by_key(key)
-        prev_close = instrument.get('last_close', 0) if instrument else 0
-
-        price_change = ltp - prev_close
-        percent_change = (price_change / prev_close * 100) if prev_close != 0 else 0
-
-        indices.append({
-            "symbol": index,
-            "close": ltp,
-            "price_change": price_change,
-            "percent_change": percent_change
+        # Send the task to the worker
+        self.db_task_queues[min_index].put({
+            'type': data_type,
+            'data': buffer
         })
 
-    return {"indices": indices}
+    def _db_worker_thread(self, worker_id, task_queue):
+        """Worker thread function to save data to the database."""
+        print(f"Database worker {worker_id} started")
 
-@app.get('/api/latest_price')
-async def get_latest_price(instrument_key: str):
-    """Fetch the latest price for a given instrument key."""
-    global active_subscription
+        while self.db_workers_running:
+            try:
+                # Try to get a task with timeout
+                try:
+                    task = task_queue.get(timeout=0.5)
+                except Empty:
+                    continue
 
-    if not instrument_key:
-        raise HTTPException(status_code=400, detail="Instrument key is required")
+                task_type = task['type']
+                data = task['data']
 
-    # Fetch the last close price from the database
-    try:
-        instrument = db_service.get_instrument_key_by_key(instrument_key)
-        if not instrument:
-            raise HTTPException(status_code=404, detail=f"No instrument found for key: {instrument_key}")
-        last_close = instrument.get('last_close', 0)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching last close: {str(e)}")
+                if not data:
+                    task_queue.task_done()
+                    continue
 
-    # Update the active subscription
-    active_subscription = [instrument_key]
+                # Measure performance
+                start_time = time.time()
 
-    # Wait for the WebSocket to process the subscription and fetch data
-    timeout = 30  # Maximum wait time in seconds
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        # Check if data for the requested key is available
-        if instrument_key in market_data:
-            break
-        time.sleep(0.5)  # Wait for 500ms before checking again
+                # Execute database operation based on task type
+                if task_type == 'oi_volume':
+                    # Aggregate call and put OI data by symbol
+                    symbol_oi_data = {}
 
-    # Fetch the latest data for the instrument key
-    data = market_data.get(instrument_key, {})
-    if not data:
-        raise HTTPException(status_code=404, detail="No data available for the given instrument key")
+                    # Create time bucket (rounded to nearest 5 minutes for consistent aggregation)
+                    current_time = datetime.now(pytz.timezone('Asia/Kolkata'))
+                    current_minute = current_time.minute
+                    rounded_minute = 5 * (current_minute // 5)  # Round to nearest 5 minutes
+                    display_time = f"{current_time.hour:02d}:{rounded_minute:02d}"
 
-    # Prepare the response
-    ltp = data.get("ltp", 0)
-    price_change = ltp - last_close
-    percent_change = (price_change / last_close * 100) if last_close != 0 else 0
+                    # Process all records to aggregate total call and put OI by symbol
+                    for record in data:
+                        symbol = record.get('symbol')
+                        option_type = record.get('option_type')
+                        oi = float(record.get('oi', 0) or 0)
 
-    return {
-        "ltp": ltp,
-        "last_close": last_close,
-        "price_change": price_change,
-        "percent_change": percent_change
-    }
+                        if not symbol or not option_type or option_type not in ['CE', 'PE']:
+                            continue
 
-@app.get('/api/latest-option-price')
-async def fetch_latest_option_price(symbol: str, expiry: str, strike: str, optionType: str):
-    """Fetch the latest price for a specific option, strike, and option type."""
-    global active_subscription
+                        if symbol not in symbol_oi_data:
+                            symbol_oi_data[symbol] = {'call_oi': 0, 'put_oi': 0}
 
-    if not symbol or not expiry or not strike or not optionType:
-        raise HTTPException(status_code=400, detail="Symbol, expiry, strike, and optionType are required")
+                        if option_type == 'CE':
+                            symbol_oi_data[symbol]['call_oi'] += oi
+                        elif option_type == 'PE':
+                            symbol_oi_data[symbol]['put_oi'] += oi
 
-    try:
-        # Fetch the instrument key for the given parameters
-        instrument = db_service.get_option_instrument_key(symbol, expiry, strike, optionType)
-        if not instrument:
-            raise HTTPException(status_code=404, detail="Instrument key not found for the given parameters")
+                    # Save aggregated OI data to total_oi_history table
+                    if symbol_oi_data:
+                        total_oi_records = []
+                        for symbol, oi_data in symbol_oi_data.items():
+                            call_oi = oi_data['call_oi']
+                            put_oi = oi_data['put_oi']
+                            call_put_ratio = call_oi / put_oi if put_oi > 0 else 0
 
-        instrument_key = instrument['instrument_key']
-        prev_close = instrument.get('last_close', 0)
+                            total_oi_records.append({
+                                'symbol': symbol,
+                                'display_time': display_time,
+                                'call_oi': call_oi,
+                                'put_oi': put_oi,
+                                'call_put_ratio': call_put_ratio,
+                                'timestamp': current_time
+                            })
 
-        # Update the active subscription
-        active_subscription = [instrument_key]
+                        # Save to database with upsert logic to handle 5-minute intervals
+                        try:
+                            self.db.save_total_oi_data(total_oi_records)
+                        except Exception as e:
+                            print(f"Error saving total OI data: {e}")
 
-        # Wait for the WebSocket to process the subscription and fetch data
-        timeout = 30  # Maximum wait time in seconds
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            # Check if data for the requested key is available
-            if instrument_key in market_data:
-                break
-            time.sleep(0.5)  # Wait for 500ms before checking again
+                    # Continue processing individual OI records
+                    #self.db.save_oi_volume_batch_feed(data)
+                    records_count = len(data)
+                elif task_type == 'stock_prices':
+                    self.db.update_stock_prices_batch(data)
+                    records_count = len(data)
+                elif task_type == 'options':
+                    self.db.save_options_data('options', data)
+                    records_count = len(data)
+                elif task_type == 'futures':
+                    self.db.save_futures_data('futures', data)
+                    records_count = len(data)
+                else:
+                    records_count = 0
 
-        # Fetch the latest data for the instrument key
-        data = market_data.get(instrument_key, {})
-        if not data:
-            raise HTTPException(status_code=404, detail="No data available for the given instrument key")
+                # Update performance stats
+                elapsed = time.time() - start_time
+                with threading.Lock():
+                    self.db_stats[task_type]['count'] += records_count
+                    self.db_stats[task_type]['time'] += elapsed
 
-        # Prepare the response
-        ltp = data.get("ltp", 0)
-        price_change = ltp - prev_close
-        percent_change = (price_change / prev_close * 100) if prev_close != 0 else 0
+                # Log worker performance occasionally
+                if worker_id == 0 and time.time() - self.last_stats_time > 30:
+                    self._log_db_stats()
 
-        return {
-            "price": ltp,
-            "prev_close": prev_close,
-            "price_change": price_change,
-            "percent_change": percent_change,
-            "timestamp": time.time()
+                task_queue.task_done()
+
+            except Exception as e:
+                print(f"Error in database worker {worker_id}: {e}")
+                time.sleep(0.1)
+
+        print(f"Database worker {worker_id} stopped")
+
+    def _log_db_stats(self):
+        """Log database performance statistics."""
+        current_time = time.time()
+        elapsed = current_time - self.last_stats_time
+        if elapsed < 1:
+            return
+
+        stats_str = "Database stats: "
+        for data_type, stats in self.db_stats.items():
+            if stats['count'] > 0:
+                rate = stats['count'] / elapsed
+                avg_time = (stats['time'] * 1000 / stats['count']) if stats['count'] > 0 else 0
+                stats_str += f"{data_type}: {rate:.1f}/s ({avg_time:.1f}ms/rec), "
+
+        print(stats_str)
+
+        # Reset statistics
+        self.db_stats = {
+            'oi_volume': {'count': 0, 'time': 0},
+            'stock_prices': {'count': 0, 'time': 0},
+            'options': {'count': 0, 'time': 0},
+            'futures': {'count': 0, 'time': 0}
         }
+        self.last_stats_time = current_time
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching latest price: {str(e)}")
+    async def stop(self):
+        """Stop the feed worker gracefully."""
+        self.running = False
 
-@app.get('/api/live_oi_volume')
-async def fetch_live_oi_volume(symbol: str, expiry: str, strike: str, optionType: str):
-    """Fetch live OI and volume for a specific option."""
-    global active_subscription
+        # Stop database workers
+        self.db_workers_running = False
 
-    if not symbol or not expiry or not strike or not optionType:
-        raise HTTPException(status_code=400, detail="Symbol, expiry, strike, and optionType are required")
+        # Wait for database threads to finish
+        if self.db_distributor_thread:
+            self.db_distributor_thread.join(timeout=2)
 
-    try:
-        # Fetch the instrument key for the given parameters
-        instrument = db_service.get_option_instrument_key(symbol, expiry, strike, optionType)
-        if not instrument:
-            raise HTTPException(status_code=404, detail="Instrument key not found for the given parameters")
+        for worker in self.db_workers:
+            worker.join(timeout=1)
 
-        instrument_key = instrument['instrument_key']
+        if self.processing_task:
+            self.processing_task.cancel()
+            try:
+                await self.processing_task
+            except asyncio.CancelledError:
+                pass
 
-        # Update the active subscription
-        active_subscription = [instrument_key]
+        # Cancel all connection tasks
+        await self.stop_connections()
 
-        # Wait for the WebSocket to process the subscription and fetch data
-        timeout = 30  # Maximum wait time in seconds
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            # Check if data for the requested key is available
-            if instrument_key in market_data:
-                break
-            time.sleep(0.5)  # Wait for 500ms before checking again
+        print("Feed worker stopped")
 
-        # Fetch the latest data for the instrument key
-        data = market_data.get(instrument_key, {})
-        if not data:
-            raise HTTPException(status_code=404, detail="No data available for the given instrument key")
-
-        # Prepare the response with correct OI and volume values
-        return {
-            "oi": data.get("oi", 0),
-            "volume": data.get("volume", 0),
-            "timestamp": time.time()
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching live OI and volume: {str(e)}")
-
-@app.get('/api/instruments')
-async def get_instrument_key(symbol: str, exchange: str):
-    """Fetch the instrument key for a specific symbol and exchange."""
-    if not symbol or not exchange:
-        raise HTTPException(status_code=400, detail="Symbol and exchange parameters are required")
-
-    try:
-        # Fetch the instrument key for the given symbol and exchange from the database
-        instrument = db_service.get_instrument_key_by_symbol_and_exchange(symbol, exchange)
-        if not instrument:
-            raise HTTPException(status_code=404,
-                                detail=f"No instrument key found for symbol: {symbol} and exchange: {exchange}")
-
-        return {
-            'symbol': instrument['symbol'],
-            'instrument_key': instrument['instrument_key'],
-            'exchange': instrument['exchange'],
-            'tradingsymbol': instrument['tradingsymbol']
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get('/api/trading_instruments')
-async def get_trading_instruments_key(symbol: str):
-    """Fetch the instrument key for a specific symbol and exchange."""
-    if not symbol:
-        raise HTTPException(status_code=400, detail="Symbol parameter is required")
-
-    try:
-        instrument = db_service.get_instrument_key_by_trading_symbol(symbol)
-
-        if not instrument:
-            raise HTTPException(status_code=404,
-                                detail=f"No instrument key found for symbol: {symbol} ")
-
-        return {
-            'symbol': instrument['symbol'],
-            'instrument_key': instrument['instrument_key'],
-            'exchange': instrument['exchange'],
-            'tradingsymbol': instrument['tradingsymbol'],
-            'last_close': instrument.get('last_close', 0),
-            'lot_size': instrument.get('lot_size', 1)  # Add lot_size to the response
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get('/api/option_instruments')
-async def get_option_instruments(symbol: str):
-    """Get all option instrument keys for a specific stock."""
-    if not symbol:
-        raise HTTPException(status_code=400, detail="Symbol parameter is required")
-
-    try:
-        # Fetch all option instruments for the given symbol from the database
-        instruments = db_service.get_option_instruments_by_symbol(symbol)
-        if not instruments or len(instruments) == 0:
-            raise HTTPException(status_code=404, detail=f"No option instruments found for symbol: {symbol}")
-
-        # Group instruments by expiry and strike
-        grouped_instruments = {}
-        for instrument in instruments:
-            expiry = instrument.get('expiry', '')
-            strike = instrument.get('strike_price', '')
-            option_type = instrument.get('option_type', '')
-
-            if expiry not in grouped_instruments:
-                grouped_instruments[expiry] = {}
-
-            if strike not in grouped_instruments[expiry]:
-                grouped_instruments[expiry][strike] = {}
-
-            grouped_instruments[expiry][strike][option_type] = instrument.get('instrument_key', '')
-
-        return {
-            'symbol': symbol,
-            'instruments': grouped_instruments
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get('/api/multiple_oi_volume')
-async def fetch_multiple_oi_volume(instrument_keys: str):
-    """Fetch OI and volume for multiple instrument keys at once."""
-    global active_subscription
-
-    if not instrument_keys:
-        raise HTTPException(status_code=400, detail="instrument_keys parameter is required")
-
-    # Split into a list
-    instrument_keys_list = instrument_keys.split(',')
-
-    # Update the active subscription
-    active_subscription = instrument_keys_list
-
-    # Wait for the WebSocket to process the subscription and fetch data
-    timeout = 30  # Maximum wait time in seconds
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        # Check if data for all requested keys is available
-        if all(key in market_data for key in instrument_keys_list):
-            break
-        time.sleep(0.5)  # Wait for 500ms before checking again
-
-    # Prepare the response with OI and volume data for all instruments
-    result = {}
-    for key in instrument_keys_list:
-        data = market_data.get(key, {})
-        result[key] = {
-            "oi": data.get("oi", 0),
-            "volume": data.get("volume", 0),
-            "ltp": data.get("ltp", 0)
-        }
-
-    return result
-
-@app.get("/api/stocks")
-async def get_stocks():
-    """Fetch all available stock symbols for which options are available."""
-    try:
-        stocks = db_service.get_all_symbols()
-        if not stocks:
-            raise HTTPException(status_code=404, detail="No stocks found with option instruments")
-        return stocks
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/watchlist_data")
-async def get_watchlist_data(symbols: str):
-    """Fetch live price data for watchlist symbols."""
-    global active_subscription
-
-    if not symbols:
-        raise HTTPException(status_code=400, detail="No symbols specified")
-
-    symbol_list = symbols.split(',')
-
-    # Limit the number of symbols that can be processed in a single request
-    if len(symbol_list) > 50:
-        raise HTTPException(status_code=400, detail="Too many symbols requested. Maximum is 50 per request.")
-
-    print(f"Processing watchlist data request for {len(symbol_list)} symbols")
-
-    # Use concurrent processing for fetching instrument keys
-    instrument_keys = []
-    instrument_details = {}
-
-    # Define a function to fetch a single instrument key
-    def fetch_instrument_key(symbol):
+    async def fetch_instrument_keys(self):
+        """Fetch up to 6000 instrument keys."""
         try:
-            # Try with trading symbol first
-            instrument = db_service.get_instrument_key_by_trading_symbol(symbol)
+            # Set a timeout for fetching keys to prevent long delays
+            instruments = await asyncio.wait_for(
+                self.db.get_instrument_keys_async(limit=6000),  # Increased to 6000 instruments
+                timeout=20  # 20 second timeout for database query
+            )
 
-            if instrument:
-                return {
-                    'symbol': symbol,
-                    'found': True,
-                    'instrument_key': instrument['instrument_key'],
-                    'lot_size': instrument.get('lot_size', 1),
-                    'last_close': instrument.get('last_close', 0)
-                }
-            else:
-                # If not found by trading symbol, try by symbol and exchange
-                instrument = db_service.get_instrument_key_by_symbol_and_exchange(symbol, "NSE_EQ")
-                if instrument:
-                    return {
-                        'symbol': symbol,
-                        'found': True,
-                        'instrument_key': instrument['instrument_key'],
-                        'lot_size': instrument.get('lot_size', 1),
-                        'last_close': instrument.get('last_close', 0)
-                    }
+            if not instruments:
+                print("No instruments found during initial fetch")
+                return False
 
-                return {
-                    'symbol': symbol,
-                    'found': False
-                }
+            print(f"Found {len(instruments)} instruments during initial fetch")
+
+            # Store keys and create instrument cache at the same time
+            self.instrument_keys = []
+            self.instrument_cache = {}
+
+            for instrument in instruments:
+                self.instrument_keys.append(instrument['instrument_key'])
+                self.instrument_cache[instrument['instrument_key']] = instrument
+
+            self.cache_refresh_time = time.time()
+
+            # Ensure we don't exceed total capacity (MAX_CONNECTIONS * MAX_KEYS_PER_CONNECTION)
+            max_total_keys = self.MAX_CONNECTIONS * self.MAX_KEYS_PER_CONNECTION
+            if len(self.instrument_keys) > max_total_keys:
+                print(f"Limiting instruments from {len(self.instrument_keys)} to {max_total_keys}")
+                self.instrument_keys = self.instrument_keys[:max_total_keys]
+
+            # Split keys into batches for each connection
+            self.connection_key_batches = self._split_keys_for_connections(self.instrument_keys)
+
+            print(f"Prepared {len(self.instrument_keys)} instruments across {len(self.connection_key_batches)} connections")
+            return True
+
+        except asyncio.TimeoutError:
+            print("Timeout while fetching instrument keys")
+            return False
         except Exception as e:
-            print(f"Error getting instrument key for {symbol}: {e}")
-            return {
-                'symbol': symbol,
-                'found': False,
-                'error': str(e)
-            }
+            print(f"Error fetching instrument keys: {e}")
+            return False
 
-    # Use batch lookup if available in db_service
-    try:
-        # First try batch lookup
-        batch_results = db_service.batch_get_instrument_keys(symbol_list)
-        if batch_results:
-            print(f"Successfully used batch lookup for {len(batch_results)} symbols")
+    def _split_keys_for_connections(self, keys):
+        """Split instrument keys into batches for each connection."""
+        if not keys:
+            return []
 
-            for symbol, data in batch_results.items():
-                if data and 'instrument_key' in data:
-                    instrument_keys.append(data['instrument_key'])
-                    instrument_details[symbol] = {
-                        'instrument_key': data['instrument_key'],
-                        'lot_size': data.get('lot_size', 1),
-                        'last_close': float(data.get('last_close', 0))  # Convert Decimal to float
-                    }
-        else:
-            # Fall back to concurrent processing if batch lookup is not implemented
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(symbol_list))) as executor:
-                results = list(executor.map(fetch_instrument_key, symbol_list))
+        # Calculate how many connections we need
+        num_connections = min(self.MAX_CONNECTIONS,
+                             (len(keys) + self.MAX_KEYS_PER_CONNECTION - 1) // self.MAX_KEYS_PER_CONNECTION)
 
-                for result in results:
-                    if result['found']:
-                        symbol = result['symbol']
-                        instrument_keys.append(result['instrument_key'])
-                        instrument_details[symbol] = {
-                            'instrument_key': result['instrument_key'],
-                            'lot_size': result.get('lot_size', 1),
-                            'last_close': float(result.get('last_close', 0))  # Convert Decimal to float
-                        }
-    except AttributeError:
-        # If batch_get_instrument_keys is not implemented, use concurrent processing
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(symbol_list))) as executor:
-            results = list(executor.map(fetch_instrument_key, symbol_list))
+        # Split keys into roughly equal batches
+        batches = []
+        for i in range(num_connections):
+            start_idx = i * self.MAX_KEYS_PER_CONNECTION
+            end_idx = min(start_idx + self.MAX_KEYS_PER_CONNECTION, len(keys))
+            batch = keys[start_idx:end_idx]
+            if batch:  # Only add non-empty batches
+                batches.append(batch)
 
-            for result in results:
-                if result['found']:
-                    symbol = result['symbol']
-                    instrument_keys.append(result['instrument_key'])
-                    instrument_details[symbol] = {
-                        'instrument_key': result['instrument_key'],
-                        'lot_size': result.get('lot_size', 1),
-                        'last_close': float(result.get('last_close', 0))  # Convert Decimal to float
-                    }
+        return batches
 
-    # If we don't have any valid instrument keys, return empty result
-    if not instrument_keys:
-        return {}
+    async def run_feed(self):
+        """Main feed running loop with multiple connections."""
+        while self.running:
+            try:
+                # Check if market is open before trying to connect
+                if not self.is_market_open():
+                    await asyncio.sleep(1)
+                    continue
 
-    # Update the active subscription with all the instrument keys
-    active_subscription = instrument_keys
-    print(f"Updating active subscription with {len(instrument_keys)} instrument keys")
+                # If no connection batches available, try to fetch them
+                if not self.connection_key_batches:
+                    print("No instrument key batches available, retrying fetch")
+                    success = await asyncio.wait_for(
+                        self.fetch_instrument_keys(),
+                        timeout=10
+                    )
+                    if not success:
+                        await asyncio.sleep(0.5)
+                        continue
 
-    # Wait for data to be fetched - use a more efficient approach
-    timeout = 25  # 25 seconds timeout
-    start_time = time.time()
+                # Calculate how many active connections we have
+                active_connections = sum(1 for task in self.connection_tasks if task and not task.done())
 
-    # Check more frequently at the beginning, then back off
-    check_intervals = [0.05, 0.1, 0.2, 0.5, 1.0, 2.0]
-    check_index = 0
-    min_wait_time = 0.05
+                # If we have all the connections we need, just monitor them
+                if active_connections >= len(self.connection_key_batches):
+                    await asyncio.sleep(0.5)
+                    continue
+                
+                # Start connections for any missing batches
+                for i, key_batch in enumerate(self.connection_key_batches):
+                    # Skip if we already have a connection for this batch
+                    if i < len(self.connection_tasks) and self.connection_tasks[i] and not self.connection_tasks[i].done():
+                        continue
 
-    while time.time() - start_time < timeout:
-        # Count how many instruments we have data for
-        available_count = sum(1 for key in instrument_keys if key in market_data)
+                    # Select the appropriate token for this connection
+                    # For even connection indices, use the first token; for odd, use the second token
+                    token_index = min(i % len(self.access_tokens), len(self.access_tokens) - 1)
+                    token = self.access_tokens[token_index]
+                    token_id = 1 if token == self.access_token_1 else 3
 
-        # If we have data for all instruments or at least 75% of them after 5 seconds, return what we have
-        elapsed = time.time() - start_time
-        if available_count == len(instrument_keys) or (elapsed > 5 and available_count >= len(instrument_keys) * 0.75):
-            break
+                    print(f"Starting feed connection {i+1}/{len(self.connection_key_batches)} with {len(key_batch)} instruments using token from ID={token_id}")
 
-        # Use adaptive wait times that increase over time
-        check_index = min(check_index, len(check_intervals) - 1)
-        wait_time = check_intervals[check_index]
-        check_index += 1
+                    # Create a new connection task
+                    connection_task = asyncio.create_task(
+                        self.persistent_connection_manager(key_batch, token, i)
+                    )
 
-        # Don't wait less than min_wait_time
-        await asyncio.sleep(max(min_wait_time, wait_time))
+                    # Add to our list of tasks
+                    if i < len(self.connection_tasks):
+                        self.connection_tasks[i] = connection_task
+                    else:
+                        self.connection_tasks.append(connection_task)
 
-    # Prepare the result data - use dictionary comprehension for efficiency
-    result = {}
-    for symbol in symbol_list:
-        details = instrument_details.get(symbol)
-        if not details:
-            continue
+                    # Wait between starting connections to avoid overwhelming the server
+                    await asyncio.sleep(self.CONNECTION_DELAY)
 
-        instrument_key = details['instrument_key']
-        lot_size = details['lot_size']
-        last_close = details['last_close']  # This is now a float
-
-        if instrument_key and instrument_key in market_data:
-            data = market_data.get(instrument_key, {})
-
-            # Calculate price_change and percent_change
-            ltp = data.get("ltp", 0) or 0
-            price_change = ltp - last_close  # No more type error
-            percent_change = (price_change / last_close * 100) if last_close != 0 else 0
-
-            result[symbol] = {
-                "ltp": ltp,
-                "last_close": last_close,
-                "price_change": price_change,
-                "percent_change": percent_change,
-                "volume": data.get("volume", 0),
-                "timestamp": time.time(),
-                "lot_size": lot_size  # Include lot_size in the response
-            }
-
-    # Print performance stats
-    processing_time = time.time() - start_time
-    found_count = sum(1 for sym_data in result.values() if sym_data.get("ltp", 0) > 0)
-    print(f"Processed watchlist data: {found_count}/{len(symbol_list)} symbols in {processing_time:.2f}s")
-
-    return result
-
-@app.get("/api/batch_trading_instruments")
-async def get_batch_trading_instruments(symbols: str):
-    """Fetch instrument keys for multiple trading symbols in a single request."""
-    if not symbols:
-        raise HTTPException(status_code=400, detail="Symbols parameter is required")
-
-    symbols_list = symbols.split(',')
-    print(f"Processing batch request for {len(symbols_list)} symbols: {symbols}")
-
-    result = {}
-    not_found = []
-
-    try:
-        # Use a more efficient batch query if available in your database service
-        for symbol in symbols_list:
-            instrument = db_service.get_instrument_key_by_trading_symbol(symbol)
-            if instrument:
-                result[symbol] = {
-                    'symbol': instrument['symbol'],
-                    'instrument_key': instrument['instrument_key'],
-                    'exchange': instrument['exchange'],
-                    'tradingsymbol': instrument['tradingsymbol'],
-                    'last_close': instrument.get('last_close', 0),
-                    'lot_size': instrument.get('lot_size', 1)
-                }
-            else:
-                not_found.append(symbol)
-
-        return {
-            "success": True,
-            "found": result,
-            "not_found": not_found
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching batch instrument data: {str(e)}")
-
-# API endpoint to manually close and restart the WebSocket connection
-@app.post("/api/restart_websocket")
-async def restart_websocket():
-    """Manually close and restart the WebSocket connection."""
-    try:
-        await close_existing_websocket()
-        return {"message": "WebSocket connection closed and will be restarted automatically"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error restarting WebSocket: {str(e)}")
-
-@app.post("/api/restart_all_websockets")
-async def restart_all_websockets():
-    """Manually close all WebSocket connections and restart."""
-    try:
-        # Get all tokens
-        tokens = list(active_websocket_connections.keys())
-
-        # Close each connection
-        for token in tokens:
-            await close_websocket_by_token(token)
-
-        # Also close the current websocket
-        await close_existing_websocket()
-
-        return {"message": f"Closed {len(tokens)} WebSocket connections. New connections will be established automatically."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error restarting WebSockets: {str(e)}")
-
-@app.get("/api/options-orders-analysis")
-async def get_options_orders_analysis():
-    """Fetch options orders with live market data."""
-    try:
-        # First get all options orders from the database
-        options_orders = db_service.get_full_options_orders()
-        if not options_orders:
-            return {"data": []}
-
-        # Get all instrument keys from the options orders
-        instrument_keys = [order['instrument_key'] for order in options_orders if order.get('instrument_key')]
-
-        # If we have instrument keys, fetch live market data for them
-        if instrument_keys:
-            # Update the active subscription
-            global active_subscription
-            active_subscription = instrument_keys
-
-            # Wait for data to be available (with timeout)
-            timeout = 30  # seconds
-            start_time = time.time()
-
-            while time.time() - start_time < timeout:
-                # Check if we have data for all requested keys
-                if all(key in market_data for key in instrument_keys):
-                    break
+                # Sleep before checking connections again
                 await asyncio.sleep(0.5)
 
-        # Prepare the response by combining database and live data
-        response_data = []
-        orders_to_update = []  # Track orders that need status update
+            except Exception as e:
+                print(f"Main feed loop error: {e}")
+                await asyncio.sleep(0.5)
 
-        for order in options_orders:
-            instrument_key = order.get('instrument_key')
-            live_data = market_data.get(instrument_key, {}) if instrument_key else {}
+    async def persistent_connection_manager(self, key_batch, token, connection_id):
+        """Manage a persistent connection with automatic reconnection."""
+        retry_count = 0
+        max_retries = 5
 
-            # Calculate days captured from timestamp
-            days_captured = 'N/A'
-            if order.get('timestamp'):
-                try:
-                    # Parse the timestamp as UTC
-                    capture_date = datetime.fromisoformat(order['timestamp'].replace('Z', '+00:00'))
-
-                    # Make sure current_date is also timezone-aware (UTC)
-                    current_date = datetime.now(capture_date.tzinfo)
-
-                    # Now both dates have timezone info, we can safely subtract
-                    days_captured = (current_date - capture_date).days
-                except Exception as e:
-                    print(f"Error calculating days captured: {e}")
-
-            # Explicitly convert values to float to avoid decimal.Decimal vs float issues
+        while self.running and retry_count < max_retries:
             try:
-                stored_ltp = float(order.get('ltp', 0) or 0)
-                current_ltp = float(live_data.get('ltp', stored_ltp) or stored_ltp)
-                
-                percent_change = 0
-                if stored_ltp and stored_ltp != 0:
-                    percent_change = ((current_ltp - stored_ltp) / stored_ltp) * 100
-            except (TypeError, ValueError) as e:
-                print(f"Error calculating percent change: {e}, stored_ltp={order.get('ltp')}, current_ltp={live_data.get('ltp')}")
-                stored_ltp = 0
-                current_ltp = 0
-                percent_change = 0
+                print(f"Connection {connection_id}: Attempting to establish (attempt {retry_count + 1}) with token ...{token[-4:]}")
 
-            # Get live OI and volume from market data
-            live_oi = float(live_data.get('oi', 0) or 0)
-            live_volume = float(live_data.get('volume', 0) or 0)
-            
-            # Get original OI and volume
-            original_oi = float(order.get('oi', 0) or 0)
-            original_volume = float(order.get('volume', 0) or 0)
-            
-            # Calculate OI and volume changes
-            oi_change = ((live_oi - original_oi) / original_oi * 100) if original_oi != 0 else 0
-            volume_change = ((live_volume - original_volume) / original_volume * 100) if original_volume != 0 else 0
+                # Use timeouts to prevent hanging
+                await asyncio.wait_for(
+                    self.manage_connection(key_batch, token, connection_id),
+                    timeout=25  # 25 second timeout
+                )
 
-            # Get current and original greek values
-            original_iv = float(order.get('iv', 0) or 0)
-            original_delta = float(order.get('delta', 0) or 0)
-            original_gamma = float(order.get('gamma', 0) or 0)
-            original_theta = float(order.get('theta', 0) or 0)
-            original_vega = float(order.get('vega', 0) or 0)
+                retry_count = 0  # Reset on successful connection
+            except asyncio.TimeoutError:
+                retry_count += 1
+                delay = min(0.5 * retry_count, 1)  # Cap delay at 1s, start with 0.5s
+                print(f"Connection {connection_id}: Timed out (attempt {retry_count}). Retrying in {delay}s")
+                await asyncio.sleep(delay)
+            except Exception as e:
+                retry_count += 1
+                delay = min(0.5 * retry_count, 1)
+                print(f"Connection {connection_id}: Error (attempt {retry_count}): {e}. Retrying in {delay}s")
+                await asyncio.sleep(delay)
 
-            # Get current greek values - these would typically come from a live options pricing API
-            # For now, we'll use the stored values
-            current_iv = float(order.get('current_iv', original_iv) or original_iv)
-            current_delta = float(order.get('current_delta', original_delta) or original_delta)
-            current_gamma = float(order.get('current_gamma', original_gamma) or original_gamma)
-            current_theta = float(order.get('current_theta', original_theta) or original_theta)
-            current_vega = float(order.get('current_vega', original_vega) or original_vega)
+        print(f"Connection {connection_id} with token ...{token[-4:]} terminated")
 
-            # Calculate greek changes
-            iv_change = ((current_iv - original_iv) / original_iv * 100) if original_iv != 0 else 0
-            delta_change = ((current_delta - original_delta) / original_delta * 100) if original_delta != 0 else 0
-            gamma_change = ((current_gamma - original_gamma) / original_gamma * 100) if original_gamma != 0 else 0
-            theta_change = ((current_theta - original_theta) / original_theta * 100) if original_theta != 0 else 0
-            vega_change = ((current_vega - original_vega) / original_vega * 100) if original_vega != 0 else 0
+    async def manage_connection(self, key_batch, token, connection_id):
+        """Manage a single websocket connection."""
+        # Set a timeout for authorization to prevent hanging
+        auth_response = await asyncio.wait_for(
+            self.get_market_data_feed_authorize(token),
+            timeout=5  # 5 second timeout
+        )
 
-            # Check if status should be "Done" (> 100% change)
-            current_status = order.get('status', 'Open')
-            
-            # Get current less than flags and initialize recovery flags
-            is_less_than_25pct = order.get('is_less_than_25pct', False)
-            is_less_than_50pct = order.get('is_less_than_50pct', False)
-            is_greater_than_25pct = order.get('is_greater_than_25pct', False)
-            is_greater_than_50pct = order.get('is_greater_than_50pct', False)
-            is_greater_than_75pct = order.get('is_greater_than_75pct', False)
-            
-            # Track lowest price point
-            lowest_point = order.get('lowest_point', min(current_ltp, stored_ltp))
-            if current_ltp < lowest_point:
-                lowest_point = current_ltp
+        if not auth_response.get('data', {}).get('authorized_redirect_uri'):
+            print(f"Connection {connection_id}: Authorization failed for token ...{token[-4:]}")
+            raise ConnectionError("Failed to authorize feed")
 
-            # Check conditions for updating
-            need_update = False
-            
-            if abs(percent_change) > 100 and current_status != 'Done':
-                current_status = 'Done'  # Update for response
-                need_update = True
-            
-            # Calculate if price is less than 25% or 50% of original price
-            if current_ltp < (stored_ltp * 0.25) and not is_less_than_25pct:
-                is_less_than_25pct = True
-                need_update = True
-                
-            if current_ltp < (stored_ltp * 0.5) and not is_less_than_50pct:
-                is_less_than_50pct = True
-                need_update = True
+        print(f"Connection {connection_id}: Establishing WebSocket connection with token ...{token[-4:]}")
 
-            if current_ltp > (stored_ltp * 1.25) and not is_greater_than_25pct:
-                is_greater_than_25pct = True
-                need_update = True
-
-            if current_ltp > (stored_ltp * 1.50) and not is_greater_than_50pct:
-                is_greater_than_50pct = True
-                need_update = True
-
-            if current_ltp > (stored_ltp * 1.75) and not is_greater_than_75pct:
-                is_greater_than_75pct = True
-                need_update = True
-                
-            # Mark for update in database if needed
-            if need_update:
-                orders_to_update.append({
-                    'symbol': order['symbol'],
-                    'strike_price': order['strike_price'],
-                    'option_type': order['option_type'],
-                    'new_status': current_status,
-                    'is_less_than_25pct': is_less_than_25pct,
-                    'is_less_than_50pct': is_less_than_50pct,
-                    'is_greater_than_25pct': is_greater_than_25pct,
-                    'is_greater_than_50pct': is_greater_than_50pct,
-                    'is_greater_than_75pct': is_greater_than_75pct,
-                    'lowest_point': lowest_point
-                })
-
-            # Safely convert all values to appropriate types
-            response_data.append({
-                'symbol': order['symbol'],
-                'strike_price': float(order['strike_price']),
-                'option_type': order['option_type'],
-                'stored_ltp': stored_ltp,
-                'current_ltp': current_ltp,
-                'percent_change': percent_change,
-                'status': current_status,  # Use the current status (could be "Done" now)
-                'daysCaptured': days_captured,  # Added days captured
-                'oi': live_oi,  # Use live OI
-                'original_oi': original_oi,  # Original OI
-                'oi_change': oi_change,  # OI change percentage
-                'volume': live_volume,  # Use live volume
-                'original_volume': original_volume,  # Original volume
-                'volume_change': volume_change,  # Volume change percentage
-                'iv': current_iv,
-                'original_iv': original_iv,
-                'iv_change': iv_change,
-                'delta': current_delta,
-                'original_delta': original_delta,
-                'delta_change': delta_change,
-                'gamma': current_gamma,
-                'original_gamma': original_gamma,
-                'gamma_change': gamma_change,
-                'theta': current_theta,
-                'original_theta': original_theta,
-                'theta_change': theta_change,
-                'vega': current_vega,
-                'original_vega': original_vega,
-                'vega_change': vega_change,
-                'pop': float(order.get('pop', 0) or 0),
-                'stored_bidq': float(order.get('bid_qty', 0) or 0),
-                'stored_askq': float(order.get('ask_qty', 0) or 0),
-                'bidQ': float(live_data.get('bidQ', 0) or 0),
-                'askQ': float(live_data.get('askQ', 0) or 0),
-                'lot_size': float(order.get('lot_size', 1) or 1),
-                'instrument_key': instrument_key,
-                'timestamp': order.get('timestamp', ''),
-                'is_less_than_25pct': is_less_than_25pct,  # Include the flag
-                'is_less_than_50pct': is_less_than_50pct,  # Include the flag
-                'is_greater_than_25pct': is_greater_than_25pct,  # Include the flag
-                'is_greater_than_50pct': is_greater_than_50pct,  # Include the flag
-                'is_greater_than_75pct': is_greater_than_75pct,  # Include the flag
-                'lowest_point': lowest_point,  # Include the lowest point
-                'role': order.get('role', 'Unknown')  # Include role if available
-            })
-
-        # Update status in database for orders that need it
-        if orders_to_update:
-            # Call database service to update statuses
-            db_service.update_options_orders_status(orders_to_update)
-            print(f"Updated status for {len(orders_to_update)} orders")
-
-        return {
-            "success": True,
-            "data": response_data,
-            "timestamp": datetime.now().isoformat()
+        # Reduced timeouts
+        connect_kwargs = {
+            'ssl': self.ssl_context,
+            'ping_interval': 10,  # Reduced from 20
+            'ping_timeout': 10,  # Reduced from 20
+            'close_timeout': 5    # Reduced from 10
         }
-    except Exception as e:
-        print(f"Error in options orders analysis: {str(e)}")
-        import traceback
-        traceback.print_exc()  # Add traceback for better debugging
-        raise HTTPException(status_code=500, detail=str(e))
 
-def close_all_websockets_sync():
-    """Synchronous function to close all WebSocket connections at startup."""
-    print("Closing all existing WebSocket connections at startup...")
+        # Set a timeout for the websocket connection establishment
+        try:
+            websocket = await asyncio.wait_for(
+                websockets.connect(
+                    auth_response['data']['authorized_redirect_uri'],
+                    **connect_kwargs
+                ),
+                timeout=5  # 5 second timeout for connection
+            )
+        except asyncio.TimeoutError:
+            print(f"Connection {connection_id}: WebSocket connection timed out")
+            raise
+
+        print(f'Connection {connection_id}: WebSocket connected, subscribing to {len(key_batch)} instruments')
+
+        async with websocket:
+            # Start subscription immediately to reduce wait time
+            subscription_task = asyncio.create_task(
+                self._subscription_manager(websocket, key_batch, connection_id)
+            )
+
+            # Start reader task after subscription is sent
+            reader_task = asyncio.create_task(
+                self._websocket_reader(websocket, key_batch, connection_id)
+            )
+
+            # Wait for first task to complete with a timeout
+            done, pending = await asyncio.wait(
+                [reader_task, subscription_task],
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=15  # 15 second overall timeout
+            )
+
+            # Cancel all pending tasks
+            for task in pending:
+                task.cancel()
+
+            # Wait for cancellations to complete
+            try:
+                await asyncio.gather(*pending, return_exceptions=True)
+            except:
+                pass
+
+    async def _websocket_reader(self, websocket, key_batch, connection_id):
+        """Dedicated task for reading from websocket."""
+        try:
+            while self.running:
+                try:
+                    # Reduced timeout for faster detection of connection issues
+                    message = await asyncio.wait_for(websocket.recv(), timeout=0.5)
+                    decoded = self.decode_protobuf(message)
+                    data_dict = MessageToDict(decoded)
+
+                    # Put message in queue for processing
+                    await self.data_queue.put(data_dict)
+
+                except asyncio.TimeoutError:
+                    # More frequent but lightweight pings
+                    try:
+                        pong_waiter = await websocket.ping()
+                        await asyncio.wait_for(pong_waiter, timeout=0.5)
+                    except:
+                        print(f"Connection {connection_id}: Ping failed, reconnecting")
+                        break
+                except Exception as e:
+                    print(f"Connection {connection_id}: Reader error: {e}")
+                    break
+        except Exception as e:
+            print(f"Connection {connection_id}: Reader task error: {e}")
+
+    async def _subscription_manager(self, websocket, key_batch, connection_id):
+        """Dedicated task for handling subscriptions."""
+        last_subscription_time = time.time()
+        subscription_interval = 30  # Refresh subscription every 30 seconds
+
+        # Initial subscription with a timeout
+        try:
+            await asyncio.wait_for(
+                self.send_subscription(websocket, key_batch, connection_id),
+                timeout=5  # 5 second timeout for subscription
+            )
+        except asyncio.TimeoutError:
+            print(f"Connection {connection_id}: Initial subscription timed out")
+            return
+        except Exception as e:
+            print(f"Connection {connection_id}: Initial subscription error: {e}")
+            return
+
+        try:
+            while self.running:
+                current_time = time.time()
+
+                # Handle periodic subscription refresh
+                if current_time - last_subscription_time > subscription_interval:
+                    try:
+                        await asyncio.wait_for(
+                            self.send_subscription(websocket, key_batch, connection_id, refresh=True),
+                            timeout=5  # 5 second timeout for refresh
+                        )
+                        last_subscription_time = current_time
+                    except Exception as e:
+                        print(f"Connection {connection_id}: Refresh subscription error: {e}")
+                        break
+
+                # Check for refresh requests (with non-blocking check)
+                if not self.refresh_request_queue.empty():
+                    try:
+                        await self.refresh_request_queue.get()
+                        await asyncio.wait_for(
+                            self.send_subscription(websocket, key_batch, connection_id, refresh=True),
+                            timeout=3
+                        )
+                        self.refresh_request_queue.task_done()
+                        last_subscription_time = current_time
+                    except Exception as e:
+                        print(f"Connection {connection_id}: Requested refresh error: {e}")
+
+                await asyncio.sleep(0.5)  # Check more frequently
+        except Exception as e:
+            print(f"Connection {connection_id}: Subscription manager error: {e}")
+
+    async def _process_queue_continuously(self):
+        """Continuously process data from the queue."""
+        while self.running:
+            try:
+                # Process in chunks for efficiency
+                chunk = []
+                start_time = time.time()
+
+                # Gather up to CHUNK_SIZE messages or wait for 0.2 seconds (reduced from 0.5)
+                while len(chunk) < self.CHUNK_SIZE and (time.time() - start_time) < 0.2:
+                    try:
+                        data = await asyncio.wait_for(self.data_queue.get(), timeout=0.1)
+                        chunk.append(data)
+                        self.data_queue.task_done()
+                    except asyncio.TimeoutError:
+                        if chunk:  # If we have some data, process it
+                            break
+
+                if chunk:
+                    await self._process_chunk(chunk)
+
+            except Exception as e:
+                print(f"Error in processing queue: {e}")
+                await asyncio.sleep(0.1)  # reduced from 1
+
+    async def _process_chunk(self, chunk):
+        """Process a chunk of market data messages."""
+        if not chunk:
+            return
+
+        current_time = datetime.now(pytz.timezone('Asia/Kolkata'))
+
+        # Combine feeds from all messages in the chunk
+        combined_feeds = {}
+        for data_dict in chunk:
+            if 'feeds' in data_dict:
+                combined_feeds.update(data_dict['feeds'])
+
+        if not combined_feeds:
+            return
+
+        instrument_keys = list(combined_feeds.keys())
+        instruments_dict = await self.get_instrument_details_cached_async(instrument_keys)
+
+        # Process instruments in parallel
+        tasks = []
+        for instrument_key, feed_data in combined_feeds.items():
+            tasks.append(
+                self.process_instrument_data(instrument_key, feed_data, current_time, instruments_dict)
+            )
+
+        # Prepare batch collections
+        oi_volume_records = []
+        stock_data_cache = []
+        options_orders = []
+        futures_orders = []
+
+        # Process results as they complete
+        for future in asyncio.as_completed(tasks):
+            oi_record, stock_data, option_order, future_order = await future
+
+            if oi_record:
+                oi_volume_records.append(oi_record)
+            if stock_data:
+                stock_data_cache.append(stock_data)
+            if option_order:
+                options_orders.append(option_order)
+            if future_order:
+                futures_orders.append(future_order)
+
+        # Queue data for the database distributor thread instead of direct saving
+        if oi_volume_records:
+            self.db_distribution_queue.put({'type': 'oi_volume', 'data': oi_volume_records})
+        if stock_data_cache:
+            self.db_distribution_queue.put({'type': 'stock_prices', 'data': stock_data_cache})
+        if options_orders:
+            self.db_distribution_queue.put({'type': 'options', 'data': options_orders})
+        if futures_orders:
+            self.db_distribution_queue.put({'type': 'futures', 'data': futures_orders})
+
+        # Update performance metrics
+        self.processed_count += len(combined_feeds)
+        if time.time() - self.last_processed_time >= 10:  # Log every 10 seconds
+            print(f"Processing rate: {self.processed_count / 10:.1f} instruments/sec")
+            self.last_processed_time = time.time()
+            self.processed_count = 0
+
+    async def get_market_data_feed_authorize(self, token=None):
+        """Get authorization for market data feed."""
+        if not token:
+            # If no token provided, use the first available token
+            if self.access_tokens:
+                token = self.access_tokens[0]
+            else:
+                print("Warning: No access tokens available")
+                return None
+        
+        headers = {
+            'Accept': 'application/json',
+            'Authorization': f'Bearer {token}'
+        }
+        url = 'https://api.upstox.com/v3/feed/market-data-feed/authorize'
+
+        try:
+            # Use a faster executor with a reduced timeout
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: requests.get(url=url, headers=headers, timeout=4)  # Reduced from 10
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"Authorization failed with token ...{token[-4:]}: {e}")
+            raise
+
+    def decode_protobuf(self, buffer):
+        """Decode protobuf message."""
+        feed_response = pb.FeedResponse()
+        feed_response.ParseFromString(buffer)
+        return feed_response
+
+    async def get_instrument_details_cached_async(self, instrument_keys):
+        """Get instrument details from cache (async)."""
+        result = {}
+
+        # Use the pre-populated cache, no need to hit the database
+        for key in instrument_keys:
+            if key in self.instrument_cache:
+                result[key] = self.instrument_cache[key]
+
+        # If somehow keys are missing from cache (shouldn't happen, but just in case)
+        missing_keys = [key for key in instrument_keys if key not in self.instrument_cache]
+        if missing_keys:
+            print(f"Warning: {len(missing_keys)} instrument keys missing from cache")
+            missing_instruments = await self.db.get_instruments_by_keys_async(missing_keys)
+            for inst in missing_instruments:
+                self.instrument_cache[inst['instrument_key']] = inst
+                result[inst['instrument_key']] = inst
+
+        return result
+
+    async def process_instrument_data(self, instrument_key, feed_data, current_time, instruments_dict):
+        """Process market data for a single instrument."""
+        try:
+            instrument = instruments_dict.get(instrument_key)
+            if not instrument:
+                return None, None, None, None
+
+            # Handle firstLevelWithGreeks format
+            if 'firstLevelWithGreeks' not in feed_data:
+                return None, None, None, None
+
+            feed_struct = feed_data['firstLevelWithGreeks']
+            ltpc = feed_struct.get('ltpc', {})
+            ltp = ltpc.get('ltp')
+            oi = feed_struct.get('oi')
+            volume = feed_struct.get('vtt')
+            greeks = feed_struct.get('optionGreeks', {})
+            first_depth = feed_struct.get('firstDepth', {})
+            iv = feed_struct.get('iv')
+
+            prev_close = instrument.get('prev_close')
+            price_change = (ltp - prev_close) if ltp and prev_close else 0
+            pct_change = ((ltp - prev_close) / prev_close * 100) if ltp and prev_close else 0
+
+            oi_record = None
+            stock_data = None
+            option_order = None
+            future_order = None
+
+            # Process based on instrument type
+            if instrument['instrument_type'] == 'FO':
+                lot_size = instrument.get('lot_size', 1)
+
+                if instrument['option_type'] in ['CE', 'PE']:  # Option
+                    bid_qty = first_depth.get('bidQ', 0)
+                    ask_qty = first_depth.get('askQ', 0)
+
+                    try:
+                        bid_qty = int(bid_qty) if bid_qty else 0
+                        ask_qty = int(ask_qty) if ask_qty else 0
+                    except (ValueError, TypeError):
+                        bid_qty, ask_qty = 0, 0
+
+                    # Only process if price is valid and quantities meet threshold
+                    if ltp and ltp >= 1 and (bid_qty > 0 or ask_qty > 0):
+                        threshold = self.OPTIONS_THRESHOLD * lot_size
+                        if bid_qty >= threshold or ask_qty >= threshold:
+                            option_order = {
+                                'stock': instrument['symbol'],
+                                'strike_price': instrument['strike_price'],
+                                'type': instrument['option_type'],
+                                'ltp': ltp,
+                                'bid_qty': bid_qty,
+                                'ask_qty': ask_qty,
+                                'lot_size': lot_size,
+                                'timestamp': current_time,
+                                'oi': oi,
+                                'volume': volume,
+                                'vega': greeks.get('vega'),
+                                'theta': greeks.get('theta'),
+                                'gamma': greeks.get('gamma'),
+                                'delta': greeks.get('delta'),
+                                'iv': iv,
+                                'pop': greeks.get('pop', 0)
+                            }
+
+                        # Always record OI data for options
+                        if oi is not None and volume is not None:
+                            oi_record = {
+                                'symbol': instrument['symbol'],
+                                'expiry': instrument['expiry_date'],
+                                'strike': instrument['strike_price'],
+                                'option_type': instrument['option_type'],
+                                'oi': oi,
+                                'volume': volume,
+                                'price': ltp,
+                                'timestamp': current_time.strftime("%H:%M"),
+                                'pct_change': pct_change,
+                                'vega': greeks.get('vega'),
+                                'theta': greeks.get('theta'),
+                                'gamma': greeks.get('gamma'),
+                                'delta': greeks.get('delta'),
+                                'iv': iv,
+                                'pop': greeks.get('pop', 0)
+                            }
+
+                elif instrument['option_type'] == 'FU':  # Future
+                    bid_qty = first_depth.get('bidQ', 0)
+                    ask_qty = first_depth.get('askQ', 0)
+
+                    try:
+                        bid_qty = int(bid_qty) if bid_qty else 0
+                        ask_qty = int(ask_qty) if ask_qty else 0
+                    except (ValueError, TypeError):
+                        bid_qty, ask_qty = 0, 0
+
+                    threshold = self.FUTURES_THRESHOLD * lot_size
+                    if bid_qty >= threshold or ask_qty >= threshold:
+                        future_order = {
+                            'stock': instrument['symbol'],
+                            'ltp': ltp,
+                            'bid_qty': bid_qty,
+                            'ask_qty': ask_qty,
+                            'lot_size': lot_size,
+                            'timestamp': current_time
+                        }
+
+                    # OI data for futures
+                    if oi is not None and volume is not None:
+                        oi_record = {
+                            'symbol': instrument['symbol'],
+                            'expiry': instrument['expiry_date'],
+                            'strike': 0,
+                            'option_type': 'FU',
+                            'oi': oi,
+                            'volume': volume,
+                            'price': ltp,
+                            'timestamp': current_time,
+                            'pct_change': pct_change,
+                            'vega': None,
+                            'theta': None,
+                            'gamma': None,
+                            'delta': None,
+                            'iv': None,
+                            'pop': None
+                        }
+
+            elif instrument['instrument_type'] in ['EQUITY', 'INDEX']:
+                symbol = f"{instrument['symbol']}.NS" if not instrument['symbol'].endswith('.NS') else instrument['symbol']
+                stock_data = {
+                    'symbol': symbol,
+                    'close': ltp,
+                    'price_change': price_change,
+                    'percent_change': pct_change,
+                    'timestamp': current_time,
+                }
+
+            return oi_record, stock_data, option_order, future_order
+
+        except Exception as e:
+            print(f"Error processing instrument {instrument_key}: {e}")
+            return None, None, None, None
+
+    async def send_subscription(self, websocket, key_batch, connection_id, refresh=False):
+        """Send subscription message to websocket."""
+        # Split large batches to reduce subscription time
+        max_batch_size = 300  # Process in smaller batches of 300 keys
+        sub_batches = [key_batch[i:i+max_batch_size] for i in range(0, len(key_batch), max_batch_size)]
+
+        if refresh:
+            try:
+                for sub_batch in sub_batches:
+                    unsubscribe_msg = {
+                        "guid": str(uuid.uuid4()),
+                        "method": "unsub",
+                        "data": {
+                            "mode": "option_greeks",
+                            "instrumentKeys": sub_batch
+                        }
+                    }
+                    await websocket.send(json.dumps(unsubscribe_msg).encode('utf-8'))
+                    await asyncio.sleep(0.05)  # Reduced from 0.1
+            except Exception as e:
+                print(f"Error during unsubscribe for connection {connection_id}: {e}")
+
+        # Subscribe in smaller batches
+        for i, sub_batch in enumerate(sub_batches):
+            subscribe_msg = {
+                "guid": str(uuid.uuid4()),
+                "method": "sub",
+                "data": {
+                    "mode": "option_greeks",
+                    "instrumentKeys": sub_batch
+                }
+            }
+            await websocket.send(json.dumps(subscribe_msg).encode('utf-8'))
+            print(f"Connection {connection_id}: Subscribed to batch {i+1}/{len(sub_batches)} ({len(sub_batch)} instruments)")
+            await asyncio.sleep(0.05)  # Small delay between batches
+
+async def main():
+    db_service = DatabaseService()
+    feed_worker = UpstoxFeedWorker(db_service)
 
     try:
-        # Get all tokens with active connections
-        tokens = list(active_websocket_connections.keys())
+        await feed_worker.start()
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        await feed_worker.stop()
 
-        # Create an event loop if needed (for the main thread)
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        # Close each connection
-        for token in tokens:
-            conn_info = active_websocket_connections.get(token, {})
-            websocket = conn_info.get('websocket')
-
-            if websocket is not None:
-                try:
-                    print(f"Closing existing WebSocket for token ending ...{token[-4:]}")
-                    # Use run_until_complete to run the coroutine synchronously
-                    loop.run_until_complete(websocket.close(code=1000, reason="Application startup"))
-                    print(f"Successfully closed WebSocket for token ending ...{token[-4:]}")
-                except Exception as e:
-                    print(f"Error closing WebSocket for token {token[-4:]}: {e}")
-                finally:
-                    # Update connection info
-                    active_websocket_connections[token]['websocket'] = None
-
-        # Also close the current websocket if it exists
-        global current_websocket
-        if current_websocket is not None:
-            try:
-                print("Closing current WebSocket connection...")
-                loop.run_until_complete(current_websocket.close())
-                print("Current WebSocket connection closed successfully")
-            except Exception as e:
-                print(f"Error closing current WebSocket: {e}")
-            finally:
-                current_websocket = None
-
-        # Reset the active_websocket_connections dictionary
-        active_websocket_connections.clear()
-
-        # Find and kill any orphaned WebSocket connections using socket module
-        try:
-            import socket
-            import psutil
-
-            # Get all connections for this process
-            proc = psutil.Process()
-            for conn in proc.connections():
-                if conn.status == 'ESTABLISHED' and 'upstox.com' in str(conn.raddr):
-                    try:
-                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        sock.connect((conn.raddr.ip, conn.raddr.port))
-                        sock.close()
-                        print(f"Closed orphaned WebSocket connection to {conn.raddr}")
-                    except Exception as e:
-                        print(f"Error closing orphaned connection: {e}")
-        except ImportError:
-            print("psutil module not available, skipping orphaned connection cleanup")
-        except Exception as e:
-            print(f"Error checking for orphaned connections: {e}")
-
-        print("All existing WebSocket connections closed")
-    except Exception as e:
-        print(f"Error in close_all_websockets_sync: {e}")
-        import traceback
-        traceback.print_exc()
-
-def run_websocket():
-    asyncio.run(websocket_worker())
-
-def start_services():
-    # First, close any existing WebSocket connections
-    close_all_websockets_sync()
-
-    # Print debug information at startup
-    print("Starting worker with empty active_subscription list")
-    print(f"Active subscription state: {active_subscription}")
-
-    # Start WebSocket in a separate thread
-    threading.Thread(target=run_websocket, daemon=True).start()
-
-    # Start FastAPI
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv('PORT', 8000)))
-
-if __name__ == '__main__':
-    # First close all existing WebSocket connections before starting any services
-    close_all_websockets_sync()
-
-    # Ensure active_subscription is empty at startup
-    active_subscription = []
-
-    start_services()
+if __name__ == "__main__":
+    asyncio.run(main())
