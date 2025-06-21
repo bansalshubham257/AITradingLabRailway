@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Any
 import pandas as pd
 import logging
 
-from services.database import DatabaseService
+from database import DatabaseService
 
 # Configure logging - only console output, no log files
 logging.basicConfig(
