@@ -14,8 +14,8 @@ import atexit
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.strategy_tracker import run_strategy_tracker
-from services.database import DatabaseService
+from strategy_tracker import run_strategy_tracker
+from database import DatabaseService
 
 # Configure logging - only console output, no log files
 logging.basicConfig(
