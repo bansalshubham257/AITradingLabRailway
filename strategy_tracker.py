@@ -378,23 +378,27 @@ class StrategyTracker:
                 if row:
                     exit_time = row[0]
                     status = row[1]
-                    
+
                     # For orders closed due to stop loss or expiry, require a cooldown period
                     # before creating a new order for the same option
                     if status in ('LOSS', 'EXPIRED'):
                         cooldown_period = timedelta(days=3)  # 3-day cooldown for loss/expired
                         can_reenter_after = exit_time + cooldown_period
-                        
-                        if datetime.now() < can_reenter_after:
+
+                        # Use timezone-aware datetime.now() for comparison
+                        current_time = datetime.now(self.tz)
+                        if current_time < can_reenter_after:
                             logger.info(f"Skipping {symbol} {strike} {option_type} - in cooldown period after {status} until {can_reenter_after}")
                             return True
-                    
+
                     # If the order was closed with profit, don't reenter for a longer period
                     elif status == 'PROFIT':
                         cooldown_period = timedelta(days=7)  # 7-day cooldown for profit orders
                         can_reenter_after = exit_time + cooldown_period
-                        
-                        if datetime.now() < can_reenter_after:
+
+                        # Use timezone-aware datetime.now() for comparison
+                        current_time = datetime.now(self.tz)
+                        if current_time < can_reenter_after:
                             logger.info(f"Skipping {symbol} {strike} {option_type} - in cooldown period after PROFIT until {can_reenter_after}")
                             return True
 
@@ -727,6 +731,13 @@ class StrategyTracker:
                         pnl_percentage = %s
                     WHERE id = %s
                 """, (exit_price, status, pnl, pnl_percentage, order_id))
+
+                # Immediately update daily capital after closing an order
+                # to ensure capital deployed is current
+                await self._update_daily_capital()
+
+                # Log capital change
+                logger.info(f"Order {order_id} closed with status {status}. Capital deployed updated.")
 
         except Exception as e:
             logger.error(f"Error closing order: {str(e)}")
@@ -1102,23 +1113,27 @@ class StrategyTracker:
                 if row:
                     exit_time = row[0]
                     status = row[1]
-                    
+
                     # For orders closed due to stop loss or expiry, require a cooldown period
                     # before creating a new order for the same option
                     if status in ('LOSS', 'EXPIRED'):
                         cooldown_period = timedelta(days=3)  # 3-day cooldown for loss/expired
                         can_reenter_after = exit_time + cooldown_period
-                        
-                        if datetime.now() < can_reenter_after:
+
+                        # Use timezone-aware datetime.now() for comparison
+                        current_time = datetime.now(self.tz)
+                        if current_time < can_reenter_after:
                             logger.info(f"Skipping {symbol} {strike} {option_type} - in cooldown period after {status} until {can_reenter_after}")
                             return True
-                    
+
                     # If the order was closed with profit, don't reenter for a longer period
                     elif status == 'PROFIT':
                         cooldown_period = timedelta(days=7)  # 7-day cooldown for profit orders
                         can_reenter_after = exit_time + cooldown_period
-                        
-                        if datetime.now() < can_reenter_after:
+
+                        # Use timezone-aware datetime.now() for comparison
+                        current_time = datetime.now(self.tz)
+                        if current_time < can_reenter_after:
                             logger.info(f"Skipping {symbol} {strike} {option_type} - in cooldown period after PROFIT until {can_reenter_after}")
                             return True
 
