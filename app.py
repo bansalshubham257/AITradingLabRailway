@@ -1451,7 +1451,7 @@ if __name__ == "__main__":
         elif is_weekday and (Config.POST_MARKET_START <= current_time <= Config.POST_MARKET_END):
             # Run financial data worker only during the post-market window
             print(f"Post-market window ({Config.POST_MARKET_START.strftime('%H:%M')}-{Config.POST_MARKET_END.strftime('%H:%M')}): Running financial data worker only...")
-            run_stock_data_updater()
+            run_prev_close_worker()
         else:
             if not is_weekday:
                 print("Market closed (weekend)")
