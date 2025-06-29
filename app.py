@@ -580,7 +580,7 @@ def run_instrument_keys_worker():
                     print("No instrument data available")
 
             # Sleep for 6 hours before next check
-            run_prev_close_worker()
+            #run_prev_close_worker()
             sleep_time = 6 * 3600
             print(f"Instrument keys worker sleeping for {sleep_time//3600} hours")
             time.sleep(sleep_time)
@@ -1402,8 +1402,8 @@ def run_background_workers():
     #upstox_feed_thread.start()
 
     #option_chain_thread.start()
-    oi_buildup_thread.start()
-    stock_data_thread.start()
+    #oi_buildup_thread.start()
+    #stock_data_thread.start()
     #financials_thread.start()
     db_clearing_thread.start()
     #instrument_keys_thread.start()
