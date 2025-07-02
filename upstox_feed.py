@@ -935,6 +935,7 @@ class UpstoxFeedWorker:
             prev_close = instrument.get('prev_close')
             price_change = (ltp - prev_close) if ltp and prev_close else 0
             pct_change = ((ltp - prev_close) / prev_close * 100) if ltp and prev_close else 0
+            print("pct_change: ", pct_change)
 
             oi_record = None
             stock_data = None
@@ -952,10 +953,12 @@ class UpstoxFeedWorker:
                     try:
                         bid_qty = int(bid_qty) if bid_qty else 0
                         ask_qty = int(ask_qty) if ask_qty else 0
+                        print("bid_qty:", bid_qty, "ask_qty:", ask_qty)
                     except (ValueError, TypeError):
                         bid_qty, ask_qty = 0, 0
 
                     # Only process if price is valid and quantities meet threshold
+                    print("ltp:", ltp, "bid_qty:", bid_qty, "ask_qty:", ask_qty)
                     if ltp and ltp >= 2.5 and (bid_qty > 0 or ask_qty > 0):
                         threshold = self.OPTIONS_THRESHOLD * lot_size
                         print("threshold:", threshold, "lot_size:", lot_size)
