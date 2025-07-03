@@ -1001,7 +1001,7 @@ class UpstoxFeedWorker:
                     ask_qty = max_ask_qty
 
                     # Only process if price is valid and quantities meet threshold
-                    print("bid_qty:", bid_qty, "ask_qty:", ask_qty, "stock:", instrument['symbol'], "strike_price:", instrument['strike_price'], "option_type:", instrument['option_type'])
+                    # print("bid_qty:", bid_qty, "ask_qty:", ask_qty, "stock:", instrument['symbol'], "strike_price:", instrument['strike_price'], "option_type:", instrument['option_type'])
                     if ltp and ltp >= 3.3 and (bid_qty > 0 or ask_qty > 0):
                         threshold = self.OPTIONS_THRESHOLD * lot_size
                         if bid_qty >= threshold or ask_qty >= threshold:
