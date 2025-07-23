@@ -1446,7 +1446,7 @@ def run_background_workers():
     #oi_buildup_thread.start()
     stock_data_thread.start()
     #financials_thread.start()
-    #db_clearing_thread.start()
+    db_clearing_thread.start()
     #instrument_keys_thread.start()
     #prev_close_thread.start()
     #consolidation_thread.start()
