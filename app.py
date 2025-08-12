@@ -1437,4 +1437,4 @@ def get_instrument_keys():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
-    run_background_workers();
+    run_stock_data_updater_copy();
