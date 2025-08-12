@@ -11,12 +11,12 @@ import pytz
 from datetime import datetime
 import threading
 import time
-from data_consolidation import run_consolidation_worker
-from option_chain import OptionChainService
-from market_data import MarketDataService
-from stock_analysis import StockAnalysisService
-from database import DatabaseService
-from scanner import ScannerService
+from services.data_consolidation import run_consolidation_worker
+from services.option_chain import OptionChainService
+from services.market_data import MarketDataService
+from services.stock_analysis import StockAnalysisService
+from services.database import DatabaseService
+from services.scanner import ScannerService
 from upstox_feed import UpstoxFeedWorker
 from config import Config
 from concurrent.futures import ThreadPoolExecutor
@@ -519,78 +519,50 @@ def run_option_chain_worker():
 
 def run_instrument_keys_worker():
     """Background worker to periodically fetch and store instrument keys in the database."""
-    print(f"Starting instrument keys worker at {datetime.now()}")
+    instrument_dict = option_chain_service.fetch_instrument_keys()
 
-    last_update_date = None
+    if instrument_dict:
+        print(f"Successfully fetched {len(instrument_dict)} filtered instruments")
 
-    while True:
-        try:
-            current_date = datetime.now().date()
+        # Save to database
+        batch_size = 500
+        filtered_instruments = []
 
-            # Update instrument keys once per day or on first run
-            if last_update_date is None or last_update_date != current_date:
-                print(f"Fetching instrument keys at {datetime.now()}")
+        # Extract strike prices for better filtering
+        for key, details in instrument_dict.items():
+            # Add instrument details including strike price from trading symbol
+            instrument_data = {
+                'instrument_key': key,
+                'tradingsymbol': details.get('trading_symbol'),
+                'name': details.get('name'),
+                'instrument_type': details.get('instrument_type'),
+                'exchange': details.get('exchange'),
+                'expiry': details.get('expiry'),
+                'lot_size': details.get('lot_size', 0)
+            }
 
-                # Fetch instrument data from Upstox with strike filtering
-                instrument_dict = option_chain_service.fetch_instrument_keys()
-
-                if instrument_dict:
-                    print(f"Successfully fetched {len(instrument_dict)} filtered instruments")
-
-                    # Save to database
-                    batch_size = 500
-                    filtered_instruments = []
-
-                    # Extract strike prices for better filtering
-                    for key, details in instrument_dict.items():
-                        # Add instrument details including strike price from trading symbol
-                        instrument_data = {
-                            'instrument_key': key,
-                            'tradingsymbol': details.get('trading_symbol'),
-                            'name': details.get('name'),
-                            'instrument_type': details.get('instrument_type'),
-                            'exchange': details.get('exchange'),
-                            'expiry': details.get('expiry'),
-                            'lot_size': details.get('lot_size', 0)
-                        }
-
-                        # Parse the trading symbol to get strike price
-                        if 'trading_symbol' in details:
-                            parsed = option_chain_service._parse_option_symbol(details['trading_symbol'])
-                            if parsed:
-                                instrument_data['strike_price'] = parsed.get('strike_price')
-                            else:
-                                # For non-options like futures
-                                instrument_data['strike_price'] = None
-
-                        filtered_instruments.append(instrument_data)
-
-                    # Save to database in batches
-                    total_instruments = len(filtered_instruments)
-                    print(f"Preparing to save {total_instruments} instruments to database")
-
-                    for i in range(0, total_instruments, batch_size):
-                        batch = filtered_instruments[i:i+batch_size]
-                        database_service.save_instrument_keys(batch)
-                        print(f"Saved batch {i//batch_size + 1}/{(total_instruments-1)//batch_size + 1} ({len(batch)} instruments)")
-
-                    last_update_date = current_date
-                    print(f"Successfully updated instrument keys at {datetime.now()}")
+            # Parse the trading symbol to get strike price
+            if 'trading_symbol' in details:
+                parsed = option_chain_service._parse_option_symbol(details['trading_symbol'])
+                if parsed:
+                    instrument_data['strike_price'] = parsed.get('strike_price')
                 else:
-                    print("No instrument data available")
+                    # For non-options like futures
+                    instrument_data['strike_price'] = None
 
-            # Sleep for 6 hours before next check
-            run_prev_close_worker()
-            sleep_time = 6 * 3600
-            print(f"Instrument keys worker sleeping for {sleep_time//3600} hours")
-            time.sleep(sleep_time)
+            filtered_instruments.append(instrument_data)
 
-        except Exception as e:
-            print(f"Error in instrument keys worker: {e}")
-            import traceback
-            traceback.print_exc()
-            # Shorter sleep on error
-            time.sleep(1800)  # 30 minutes
+        # Save to database in batches
+        total_instruments = len(filtered_instruments)
+        print(f"Preparing to save {total_instruments} instruments to database")
+
+        for i in range(0, total_instruments, batch_size):
+            batch = filtered_instruments[i:i+batch_size]
+            database_service.save_instrument_keys(batch)
+            print(f"Saved batch {i//batch_size + 1}/{(total_instruments-1)//batch_size + 1} ({len(batch)} instruments)")
+
+        print(f"Successfully updated instrument keys at {datetime.now()}")
+
 
 def run_prev_close_worker():
     """Background worker to fetch previous close prices for all instrument keys and update the database."""
@@ -849,36 +821,20 @@ def run_stock_data_updater_copy():
     stocks_per_worker = 20
     max_workers = 20  # Increase workers since we're only handling one interval
 
+    print("Running stock data update for 1d interval only...")
 
-    while True:
-        try:
-            ist = pytz.timezone('Asia/Kolkata')
-            now = datetime.now(ist)
+    # Get FNO stocks
+    fno_stocks = option_chain_service.get_fno_stocks_with_symbols()
 
-            # Clear cache on new day
+    start_time = time.time()
+    success_count = update_stocks_for_interval(fno_stocks, interval, stocks_per_worker, max_workers)
+    total_time = time.time() - start_time
 
-            # Check market hours
-            if now.weekday() in Config.TRADING_DAYS and Config.MARKET_OPEN <= now.time() <= Config.MARKET_CLOSE:
-                print(f"{now}: Running stock data update for 1d interval only...")
-
-                # Get FNO stocks
-                fno_stocks = option_chain_service.get_fno_stocks_with_symbols()
-
-                start_time = time.time()
-                success_count = update_stocks_for_interval(fno_stocks, interval, stocks_per_worker, max_workers)
-                total_time = time.time() - start_time
-
-                print(f"✅ FNO stocks completed: {success_count} stocks in {total_time:.2f}s")
-                print(f"{now}: 1d interval stock data update completed")
-
-                time.sleep(30)  # 30 minutes between updates
-            else:
-                # Sleep when market is closed
-                time.sleep(1800)  # 30 minutes
-
-        except Exception as e:
-            print(f"Error in stock data updater: {e}")
-            time.sleep(300)
+    print(f"✅ FNO stocks completed: {success_count} stocks in {total_time:.2f}s")
+    database_service.clear_old_data()
+    print("Old Data  cleared successfully")
+    run_instrument_keys_worker()
+    print("instrument keys worker done")
 
 def update_stocks_for_interval(stocks, interval, stocks_per_worker, max_workers):
     """Process all stocks for a specific interval with parallel workers"""
@@ -1393,7 +1349,7 @@ def run_db_clearing_worker():
                     last_clear_date != current_date):
 
                 print(f"{now}: Running database clearing operations...")
-                database_service.clear_old_data()
+
                 last_clear_date = current_date
                 run_instrument_keys_worker()
                 print(f"{now}: Database cleared successfully")
@@ -1447,7 +1403,7 @@ def run_background_workers():
     #oi_buildup_thread.start()
     stock_data_thread.start()
     #financials_thread.start()
-    db_clearing_thread.start()
+    #db_clearing_thread.start()
     #instrument_keys_thread.start()
     #prev_close_thread.start()
     #consolidation_thread.start()
@@ -1481,40 +1437,4 @@ def get_instrument_keys():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
-    if os.getenv('BACKGROUND_WORKER', 'false').lower() == 'true':
-        ist = pytz.timezone('Asia/Kolkata')
-        now = datetime.now(ist)
-        current_time = now.time()
-        is_weekday = now.weekday() in Config.TRADING_DAYS
-
-        if is_weekday and (Config.MARKET_OPEN <= current_time <= Config.MARKET_CLOSE):
-            print("Market is open, starting background workers...")
-            run_background_workers()
-        elif is_weekday and (Config.POST_MARKET_START <= current_time <= Config.POST_MARKET_END):
-            # Run financial data worker only during the post-market window
-            print(f"Post-market window ({Config.POST_MARKET_START.strftime('%H:%M')}-{Config.POST_MARKET_END.strftime('%H:%M')}): Running financial data worker only...")
-            run_prev_close_worker()
-        else:
-            if not is_weekday:
-                print("Market closed (weekend)")
-            else:
-                print(f"Market closed (current time: {current_time})")
-
-            # Sleep until next market open
-            sleep_seconds = market_data_service.get_seconds_until_next_open()
-            print(f"Sleeping for {sleep_seconds//3600}h {(sleep_seconds%3600)//60}m until next market open")
-            time.sleep(sleep_seconds)
-    else:
-        print("Starting web service ONLY")
-        port = int(os.environ.get("PORT", 10000))
-        db = DatabaseService()
-        if db.test_connection():
-            print("✅ Database connection successful")
-
-            # Test basic query
-            with db._get_cursor() as cur:
-                cur.execute("SELECT current_database()")
-                print(f"Connected to database: {cur.fetchone()[0]}")
-        else:
-            print("❌ Database connection failed")
-        app.run(host="0.0.0.0", port=port)
+    run_background_workers();
