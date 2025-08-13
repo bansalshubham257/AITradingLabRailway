@@ -11,12 +11,12 @@ import pytz
 from datetime import datetime
 import threading
 import time
-from services.data_consolidation import run_consolidation_worker
-from services.option_chain import OptionChainService
-from services.market_data import MarketDataService
-from services.stock_analysis import StockAnalysisService
-from services.database import DatabaseService
-from services.scanner import ScannerService
+from data_consolidation import run_consolidation_worker
+from option_chain import OptionChainService
+from market_data import MarketDataService
+from stock_analysis import StockAnalysisService
+from database import DatabaseService
+from scanner import ScannerService
 from upstox_feed import UpstoxFeedWorker
 from config import Config
 from concurrent.futures import ThreadPoolExecutor
