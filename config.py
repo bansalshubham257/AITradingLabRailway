@@ -19,7 +19,7 @@ class Config:
     MARKET_CLOSE = time(15, 32)  # 03:30 PM
     
     # Post-market window for financial data collection (3:35 PM - 3:39 PM)
-    POST_MARKET_START = time(15, 31)
+    POST_MARKET_START = time(15, 30)
     POST_MARKET_END = time(15, 50)
 
     # Database clearing time window
