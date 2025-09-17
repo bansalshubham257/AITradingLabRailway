@@ -16,7 +16,7 @@ from typing import List, Dict, Any, Optional
 import concurrent.futures
 
 from config import Config
-from database import DatabaseService
+from services.database import DatabaseService
 import MarketDataFeed_pb2
 
 # FastAPI app setup
@@ -906,7 +906,7 @@ async def get_options_orders_analysis():
             try:
                 stored_ltp = float(order.get('ltp', 0) or 0)
                 current_ltp = float(live_data.get('ltp', stored_ltp) or stored_ltp)
-                
+
                 percent_change = 0
                 if stored_ltp and stored_ltp != 0:
                     percent_change = ((current_ltp - stored_ltp) / stored_ltp) * 100
@@ -919,11 +919,11 @@ async def get_options_orders_analysis():
             # Get live OI and volume from market data
             live_oi = float(live_data.get('oi', 0) or 0)
             live_volume = float(live_data.get('volume', 0) or 0)
-            
+
             # Get original OI and volume
             original_oi = float(order.get('oi', 0) or 0)
             original_volume = float(order.get('volume', 0) or 0)
-            
+
             # Calculate OI and volume changes
             oi_change = ((live_oi - original_oi) / original_oi * 100) if original_oi != 0 else 0
             volume_change = ((live_volume - original_volume) / original_volume * 100) if original_volume != 0 else 0
@@ -952,14 +952,14 @@ async def get_options_orders_analysis():
 
             # Check if status should be "Done" (> 100% change)
             current_status = order.get('status', 'Open')
-            
+
             # Get current less than flags and initialize recovery flags
             is_less_than_25pct = order.get('is_less_than_25pct', False)
             is_less_than_50pct = order.get('is_less_than_50pct', False)
             is_greater_than_25pct = order.get('is_greater_than_25pct', False)
             is_greater_than_50pct = order.get('is_greater_than_50pct', False)
             is_greater_than_75pct = order.get('is_greater_than_75pct', False)
-            
+
             # Track lowest price point
             lowest_point = order.get('lowest_point', min(current_ltp, stored_ltp))
             if current_ltp < lowest_point:
@@ -967,16 +967,16 @@ async def get_options_orders_analysis():
 
             # Check conditions for updating
             need_update = False
-            
+
             if abs(percent_change) > 91 and current_status != 'Done':
                 current_status = 'Done'  # Update for response
                 need_update = True
-            
+
             # Calculate if price is less than 25% or 50% of original price
             if current_ltp < (stored_ltp * 0.25) and not is_less_than_25pct:
                 is_less_than_25pct = True
                 need_update = True
-                
+
             if current_ltp < (stored_ltp * 0.5) and not is_less_than_50pct:
                 is_less_than_50pct = True
                 need_update = True
@@ -992,7 +992,7 @@ async def get_options_orders_analysis():
             if current_ltp > (stored_ltp * 1.75) and not is_greater_than_75pct:
                 is_greater_than_75pct = True
                 need_update = True
-                
+
             # Mark for update in database if needed
             if need_update:
                 orders_to_update.append({
@@ -1072,6 +1072,105 @@ async def get_options_orders_analysis():
         print(f"Error in options orders analysis: {str(e)}")
         import traceback
         traceback.print_exc()  # Add traceback for better debugging
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/top_performers")
+async def get_top_performers(limit: int = 50):
+    """Fetch the top performing stocks based on percentage return from previous close."""
+    try:
+        # Fetch stocks with their last_close values
+        stocks = []
+        with db_service._get_cursor() as cur:
+            cur.execute("""
+                SELECT 
+                    tradingsymbol, 
+                    symbol,
+                    instrument_key, 
+                    exchange, 
+                    last_close,
+                    lot_size
+                FROM 
+                    instrument_keys 
+                WHERE 
+                    exchange = 'NSE_EQ' AND
+                    last_close > 0
+                ORDER BY 
+                    last_close DESC
+                LIMIT %s
+            """, (limit * 3,))  # Fetch more than needed since some might not have current data
+
+            for row in cur.fetchall():
+                stocks.append({
+                    'tradingsymbol': row[0],
+                    'symbol': row[1],
+                    'instrument_key': row[2],
+                    'exchange': row[3],
+                    'last_close': float(row[4]) if row[4] else 0,
+                    'lot_size': int(row[5]) if row[5] else 1
+                })
+
+        if not stocks:
+            return {"success": False, "message": "No stocks found", "data": []}
+
+        # Get all instrument keys
+        instrument_keys = [stock['instrument_key'] for stock in stocks]
+
+        # Update the active subscription to include these instruments
+        global active_subscription
+        active_subscription = instrument_keys
+
+        # Wait for some time to get market data
+        timeout = 20  # seconds
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            # Check if we have data for at least 50 instruments or 75% of requested
+            available_count = sum(1 for key in instrument_keys if key in market_data)
+            if available_count >= min(50, len(instrument_keys) * 0.75):
+                break
+            await asyncio.sleep(0.5)
+
+        # Calculate returns and prepare results
+        results = []
+        for stock in stocks:
+            instrument_key = stock['instrument_key']
+            if instrument_key in market_data:
+                data = market_data.get(instrument_key, {})
+                ltp = data.get("ltp", 0) or 0
+                last_close = stock['last_close']
+
+                if last_close > 0:
+                    price_change = ltp - last_close
+                    percent_change = (price_change / last_close * 100)
+
+                    results.append({
+                        "symbol": stock['tradingsymbol'],
+                        "current_price": ltp,
+                        "prev_close": last_close,
+                        "price_change": price_change,
+                        "percent_change": percent_change,
+                        "volume": data.get("volume", 0),
+                        "instrument_key": instrument_key,
+                        "exchange": stock['exchange'],
+                        "lot_size": stock['lot_size']
+                    })
+
+        # Sort by percent_change in descending order
+        results.sort(key=lambda x: x["percent_change"], reverse=True)
+
+        # Limit to requested number
+        top_performers = results[:limit]
+
+        return {
+            "success": True,
+            "data": top_performers,
+            "timestamp": datetime.now().isoformat(),
+            "count": len(top_performers)
+        }
+    except Exception as e:
+        print(f"Error fetching top performers: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 def close_all_websockets_sync():
