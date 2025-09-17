@@ -1087,15 +1087,15 @@ async def get_top_performers(limit: int = 50):
                     symbol,
                     instrument_key, 
                     exchange, 
-                    last_close,
+                    prev_close,
                     lot_size
                 FROM 
                     instrument_keys 
                 WHERE 
-                    exchange = 'NSE_EQ' AND
-                    last_close > 0
+                    exchange = 'NSE_FO' AND
+                    prev_close > 0
                 ORDER BY 
-                    last_close DESC
+                    prev_close DESC
                 LIMIT %s
             """, (limit * 3,))  # Fetch more than needed since some might not have current data
 
@@ -1105,7 +1105,7 @@ async def get_top_performers(limit: int = 50):
                     'symbol': row[1],
                     'instrument_key': row[2],
                     'exchange': row[3],
-                    'last_close': float(row[4]) if row[4] else 0,
+                    'prev_close': float(row[4]) if row[4] else 0,
                     'lot_size': int(row[5]) if row[5] else 1
                 })
 
@@ -1137,7 +1137,7 @@ async def get_top_performers(limit: int = 50):
             if instrument_key in market_data:
                 data = market_data.get(instrument_key, {})
                 ltp = data.get("ltp", 0) or 0
-                last_close = stock['last_close']
+                last_close = stock['prev_close']
 
                 if last_close > 0:
                     price_change = ltp - last_close
