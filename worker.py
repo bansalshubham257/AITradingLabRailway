@@ -225,7 +225,7 @@ async def websocket_worker():
                             market_ff = full_feed.get("marketFF", {})
                             index_ff = full_feed.get("indexFF", {})
 
-                            ltpc = market_ff.get("ltpc", index_ff.get("ltpc", {}))
+                            ltpc = market_ff.get("ltp", index_ff.get("ltp", {}))
                             oi = market_ff.get("oi", 0)
 
                             volume = 0
@@ -906,7 +906,7 @@ async def get_options_orders_analysis():
             try:
                 stored_ltp = float(order.get('ltp', 0) or 0)
                 current_ltp = float(live_data.get('ltp', stored_ltp) or stored_ltp)
-                
+
                 percent_change = 0
                 if stored_ltp and stored_ltp != 0:
                     percent_change = ((current_ltp - stored_ltp) / stored_ltp) * 100
@@ -919,11 +919,11 @@ async def get_options_orders_analysis():
             # Get live OI and volume from market data
             live_oi = float(live_data.get('oi', 0) or 0)
             live_volume = float(live_data.get('volume', 0) or 0)
-            
+
             # Get original OI and volume
             original_oi = float(order.get('oi', 0) or 0)
             original_volume = float(order.get('volume', 0) or 0)
-            
+
             # Calculate OI and volume changes
             oi_change = ((live_oi - original_oi) / original_oi * 100) if original_oi != 0 else 0
             volume_change = ((live_volume - original_volume) / original_volume * 100) if original_volume != 0 else 0
@@ -952,14 +952,14 @@ async def get_options_orders_analysis():
 
             # Check if status should be "Done" (> 100% change)
             current_status = order.get('status', 'Open')
-            
+
             # Get current less than flags and initialize recovery flags
             is_less_than_25pct = order.get('is_less_than_25pct', False)
             is_less_than_50pct = order.get('is_less_than_50pct', False)
             is_greater_than_25pct = order.get('is_greater_than_25pct', False)
             is_greater_than_50pct = order.get('is_greater_than_50pct', False)
             is_greater_than_75pct = order.get('is_greater_than_75pct', False)
-            
+
             # Track lowest price point
             lowest_point = order.get('lowest_point', min(current_ltp, stored_ltp))
             if current_ltp < lowest_point:
@@ -967,16 +967,16 @@ async def get_options_orders_analysis():
 
             # Check conditions for updating
             need_update = False
-            
+
             if abs(percent_change) > 91 and current_status != 'Done':
                 current_status = 'Done'  # Update for response
                 need_update = True
-            
+
             # Calculate if price is less than 25% or 50% of original price
             if current_ltp < (stored_ltp * 0.25) and not is_less_than_25pct:
                 is_less_than_25pct = True
                 need_update = True
-                
+
             if current_ltp < (stored_ltp * 0.5) and not is_less_than_50pct:
                 is_less_than_50pct = True
                 need_update = True
@@ -992,7 +992,7 @@ async def get_options_orders_analysis():
             if current_ltp > (stored_ltp * 1.75) and not is_greater_than_75pct:
                 is_greater_than_75pct = True
                 need_update = True
-                
+
             # Mark for update in database if needed
             if need_update:
                 orders_to_update.append({
@@ -1072,6 +1072,128 @@ async def get_options_orders_analysis():
         print(f"Error in options orders analysis: {str(e)}")
         import traceback
         traceback.print_exc()  # Add traceback for better debugging
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/top-return-orders")
+async def get_top_return_orders(limit: int = 20):
+    """Fetch top options with highest returns compared to previous day close."""
+    try:
+        # First get all options orders from the database
+        options_orders = db_service.get_full_options_orders()
+        if not options_orders:
+            return {"success": False, "message": "No options data available", "data": []}
+
+        # Get all instrument keys from the options orders
+        instrument_keys = [order['instrument_key'] for order in options_orders if order.get('instrument_key')]
+
+        # If we have instrument keys, fetch live market data for them
+        if instrument_keys:
+            # Update the active subscription
+            global active_subscription
+            active_subscription = instrument_keys
+
+            # Wait for data to be available (with timeout)
+            timeout = 30  # seconds
+            start_time = time.time()
+
+            while time.time() - start_time < timeout:
+                # Check if we have data for all requested keys
+                if all(key in market_data for key in instrument_keys):
+                    break
+                await asyncio.sleep(0.5)
+
+        # Process orders and calculate return vs previous day close
+        processed_data = []
+        for order in options_orders:
+            instrument_key = order.get('instrument_key')
+            if not instrument_key:
+                continue
+
+            live_data = market_data.get(instrument_key, {})
+            if not live_data:
+                continue
+
+            # Get the symbol and fetch its instrument data for previous day close
+            symbol = order.get('symbol')
+            if not symbol:
+                continue
+
+            try:
+                # Fetch instrument data to get previous day's close
+                instrument = db_service.get_instrument_key_by_trading_symbol(symbol)
+                if not instrument:
+                    continue
+
+                prev_day_close = float(instrument.get('last_close', 0) or 0)
+                if prev_day_close <= 0:
+                    continue
+
+                # Get current LTP
+                current_ltp = float(live_data.get('ltp', 0) or 0)
+                if current_ltp <= 0:
+                    continue
+
+                # Calculate return percentage from previous day close
+                return_percentage = ((current_ltp - prev_day_close) / prev_day_close) * 100
+
+                # Get additional data
+                oi = float(live_data.get('oi', 0) or 0)
+                volume = float(live_data.get('volume', 0) or 0)
+                bid_qty = float(live_data.get('bidQ', 0) or 0)
+                ask_qty = float(live_data.get('askQ', 0) or 0)
+
+                # Determine buyer/seller role based on bid/ask quantities
+                role = "Buyer" if bid_qty > ask_qty else "Seller"
+
+                processed_data.append({
+                    'symbol': symbol,
+                    'strike_price': float(order.get('strike_price', 0) or 0),
+                    'option_type': order.get('option_type', ''),
+                    'prev_day_close': prev_day_close,
+                    'current_ltp': current_ltp,
+                    'return_percentage': return_percentage,
+                    'oi': oi,
+                    'volume': volume,
+                    'bid_qty': bid_qty,
+                    'ask_qty': ask_qty,
+                    'lot_size': float(order.get('lot_size', 1) or 1),
+                    'instrument_key': instrument_key,
+                    'role': role,
+                    'pcr': float(order.get('pcr', 0) or 0)
+                })
+            except Exception as e:
+                print(f"Error processing order for symbol {symbol}: {e}")
+                continue
+
+        # Filter out entries with null or zero values for key metrics
+        processed_data = [item for item in processed_data if
+                          item['return_percentage'] and
+                          item['prev_day_close'] > 0 and
+                          item['current_ltp'] > 0]
+
+        # Filter out index symbols
+        processed_data = [item for item in processed_data if not
+                         (item['symbol'].upper().startswith('NIFTY') or
+                          item['symbol'].upper().startswith('BANKNIFTY') or
+                          item['symbol'].upper().startswith('FINNIFTY') or
+                          item['symbol'].upper().startswith('SENSEX') or
+                          item['symbol'].upper().startswith('BANKEX'))]
+
+        # Sort by return percentage in descending order
+        processed_data.sort(key=lambda x: x['return_percentage'], reverse=True)
+
+        # Limit to the requested number of results
+        top_returns = processed_data[:limit]
+
+        return {
+            "success": True,
+            "data": top_returns,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        print(f"Error fetching top return orders: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 def close_all_websockets_sync():
