@@ -585,12 +585,8 @@ def run_prev_close_worker():
                 print(f"Updated previous close prices for {len(prev_close_data)} instruments.")
             else:
                 print("No previous close data fetched.")
-
-            # Sleep for 6 hours before the next run
-            time.sleep(6 * 3600)
         except Exception as e:
             print(f"Error in prev close worker: {e}")
-            time.sleep(1800)  # Retry after 30 minutes on error
 
 # Helper function to extract strike price from trading symbol
 def get_strike_price(trading_symbol):
@@ -835,6 +831,8 @@ def run_stock_data_updater_copy():
     print("Old Data  cleared successfully")
     run_instrument_keys_worker()
     print("instrument keys worker done")
+    run_prev_close_worker()
+    print("Prev Close worker done")
 
 def update_stocks_for_interval(stocks, interval, stocks_per_worker, max_workers):
     """Process all stocks for a specific interval with parallel workers"""
