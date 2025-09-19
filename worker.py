@@ -16,7 +16,7 @@ from typing import List, Dict, Any, Optional
 import concurrent.futures
 
 from config import Config
-from database import DatabaseService
+from services.database import DatabaseService
 import MarketDataFeed_pb2
 
 # FastAPI app setup
@@ -1054,7 +1054,8 @@ async def get_options_orders_analysis():
                 'is_greater_than_75pct': is_greater_than_75pct,  # Include the flag
                 'lowest_point': lowest_point,  # Include the lowest point
                 'role': order.get('role', 'Unknown'),  # Include role if available
-                'pcr': float(order.get('pcr', 0) or 0)
+                'pcr': float(order.get('pcr', 0) or 0),
+                'prev_close': float(order.get('prev_close', 0) or 0)
             })
 
         # Update status in database for orders that need it
@@ -1072,105 +1073,6 @@ async def get_options_orders_analysis():
         print(f"Error in options orders analysis: {str(e)}")
         import traceback
         traceback.print_exc()  # Add traceback for better debugging
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/top_performers")
-async def get_top_performers(limit: int = 50):
-    """Fetch the top performing stocks based on percentage return from previous close."""
-    try:
-        # Fetch stocks with their last_close values
-        stocks = []
-        with db_service._get_cursor() as cur:
-            cur.execute("""
-                SELECT 
-                    tradingsymbol, 
-                    symbol,
-                    instrument_key, 
-                    exchange, 
-                    prev_close,
-                    lot_size
-                FROM 
-                    instrument_keys 
-                WHERE 
-                    exchange = 'NSE_FO' AND
-                    prev_close > 0
-                ORDER BY 
-                    prev_close DESC
-                LIMIT %s
-            """, (limit * 3,))  # Fetch more than needed since some might not have current data
-
-            for row in cur.fetchall():
-                stocks.append({
-                    'tradingsymbol': row[0],
-                    'symbol': row[1],
-                    'instrument_key': row[2],
-                    'exchange': row[3],
-                    'prev_close': float(row[4]) if row[4] else 0,
-                    'lot_size': int(row[5]) if row[5] else 1
-                })
-
-        if not stocks:
-            return {"success": False, "message": "No stocks found", "data": []}
-
-        # Get all instrument keys
-        instrument_keys = [stock['instrument_key'] for stock in stocks]
-
-        # Update the active subscription to include these instruments
-        global active_subscription
-        active_subscription = instrument_keys
-
-        # Wait for some time to get market data
-        timeout = 20  # seconds
-        start_time = time.time()
-
-        while time.time() - start_time < timeout:
-            # Check if we have data for at least 50 instruments or 75% of requested
-            available_count = sum(1 for key in instrument_keys if key in market_data)
-            if available_count >= min(50, len(instrument_keys) * 0.75):
-                break
-            await asyncio.sleep(0.5)
-
-        # Calculate returns and prepare results
-        results = []
-        for stock in stocks:
-            instrument_key = stock['instrument_key']
-            if instrument_key in market_data:
-                data = market_data.get(instrument_key, {})
-                ltp = data.get("ltp", 0) or 0
-                last_close = stock['prev_close']
-
-                if last_close > 0:
-                    price_change = ltp - last_close
-                    percent_change = (price_change / last_close * 100)
-
-                    results.append({
-                        "symbol": stock['tradingsymbol'],
-                        "current_price": ltp,
-                        "prev_close": last_close,
-                        "price_change": price_change,
-                        "percent_change": percent_change,
-                        "volume": data.get("volume", 0),
-                        "instrument_key": instrument_key,
-                        "exchange": stock['exchange'],
-                        "lot_size": stock['lot_size']
-                    })
-
-        # Sort by percent_change in descending order
-        results.sort(key=lambda x: x["percent_change"], reverse=True)
-
-        # Limit to requested number
-        top_performers = results[:limit]
-
-        return {
-            "success": True,
-            "data": top_performers,
-            "timestamp": datetime.now().isoformat(),
-            "count": len(top_performers)
-        }
-    except Exception as e:
-        print(f"Error fetching top performers: {str(e)}")
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 def close_all_websockets_sync():
