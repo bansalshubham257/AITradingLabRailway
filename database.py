@@ -399,7 +399,7 @@ class DatabaseService:
                         o.is_greater_than_25pct,
                         o.is_greater_than_50pct,
                         o.is_greater_than_75pct,
-                        o.pcr
+                        o.pcr,
                         i.prev_close
                     FROM options_orders o
                     LEFT JOIN instrument_keys i ON 
