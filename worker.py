@@ -16,7 +16,7 @@ from typing import List, Dict, Any, Optional
 import concurrent.futures
 
 from config import Config
-from services.database import DatabaseService
+from database import DatabaseService
 import MarketDataFeed_pb2
 
 # FastAPI app setup
