@@ -400,6 +400,7 @@ class DatabaseService:
                         o.is_greater_than_50pct,
                         o.is_greater_than_75pct,
                         o.pcr
+                        i.prev_close
                     FROM options_orders o
                     LEFT JOIN instrument_keys i ON 
                         o.symbol = i.symbol AND 
@@ -434,7 +435,8 @@ class DatabaseService:
                     'is_greater_than_25pct': r[20] if r[20] is not None else False,
                     'is_greater_than_50pct': r[21] if r[21] is not None else False,
                     'is_greater_than_75pct': r[22] if r[22] is not None else False,
-                    'pcr': r[23] if r[23] is not None else 0.0
+                    'pcr': r[23] if r[23] is not None else 0.0,
+                    'prev_close': float(r[24]) if r[24] is not None else None
                 } for r in results]
         except Exception as e:
             print(f"Error fetching options orders: {str(e)}")
@@ -2990,6 +2992,5 @@ class DatabaseService:
         except Exception as e:
             print(f"Error saving upstox account: {str(e)}")
             return False
-
 
 
