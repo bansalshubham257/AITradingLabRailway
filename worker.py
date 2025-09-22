@@ -16,7 +16,7 @@ from typing import List, Dict, Any, Optional
 import concurrent.futures
 
 from config import Config
-from database import DatabaseService
+from services.database import DatabaseService
 import MarketDataFeed_pb2
 
 # FastAPI app setup
@@ -916,6 +916,16 @@ async def get_options_orders_analysis():
                 current_ltp = 0
                 percent_change = 0
 
+            # Calculate today's return using prev_close
+            todays_return = 0
+            try:
+                prev_close = float(order.get('prev_close', 0) or 0)
+                if prev_close and prev_close > 0:
+                    todays_return = ((current_ltp - prev_close) / prev_close) * 100
+            except (TypeError, ValueError) as e:
+                print(f"Error calculating today's return: {e}, prev_close={order.get('prev_close')}, current_ltp={current_ltp}")
+                todays_return = 0
+
             # Get live OI and volume from market data
             live_oi = float(live_data.get('oi', 0) or 0)
             live_volume = float(live_data.get('volume', 0) or 0)
@@ -1016,6 +1026,7 @@ async def get_options_orders_analysis():
                 'stored_ltp': stored_ltp,
                 'current_ltp': current_ltp,
                 'percent_change': percent_change,
+                'todays_return': todays_return,  # Add today's return to response
                 'status': current_status,  # Use the current status (could be "Done" now)
                 'daysCaptured': days_captured,  # Added days captured
                 'oi': live_oi,  # Use live OI
