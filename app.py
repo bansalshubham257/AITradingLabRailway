@@ -565,28 +565,28 @@ def run_instrument_keys_worker():
 
 
 def run_prev_close_worker():
-    """Background worker to fetch previous close prices for all instrument keys and update the database."""
+    """Fetch previous close prices for all instrument keys and update the database (runs once)."""
     print(f"Starting prev close worker at {datetime.now()}")
-    while True:
-        try:
-            # Fetch all instrument keys
-            instrument_keys = database_service.get_all_instrument_keys()
-            if not instrument_keys:
-                print("No instrument keys found.")
-                time.sleep(3600)  # Sleep for 1 hour if no keys are found
-                continue
+    try:
+        # Fetch all instrument keys
+        instrument_keys = database_service.get_all_instrument_keys()
+        if not instrument_keys:
+            print("No instrument keys found.")
+            return
 
-            # Fetch previous close prices
-            prev_close_data = option_chain_service.fetch_prev_close_prices(instrument_keys)
+        # Fetch previous close prices
+        prev_close_data = option_chain_service.fetch_prev_close_prices(instrument_keys)
 
-            # Update the database with the fetched data
-            if prev_close_data:
-                database_service.update_instrument_keys_with_prev_close(prev_close_data)
-                print(f"Updated previous close prices for {len(prev_close_data)} instruments.")
-            else:
-                print("No previous close data fetched.")
-        except Exception as e:
-            print(f"Error in prev close worker: {e}")
+        # Update the database with the fetched data
+        if prev_close_data:
+            database_service.update_instrument_keys_with_prev_close(prev_close_data)
+            print(f"Updated previous close prices for {len(prev_close_data)} instruments.")
+        else:
+            print("No previous close data fetched.")
+    except Exception as e:
+        print(f"Error in prev close worker: {e}")
+    
+    print(f"Prev close worker completed at {datetime.now()}")
 
 # Helper function to extract strike price from trading symbol
 def get_strike_price(trading_symbol):
