@@ -225,7 +225,7 @@ async def websocket_worker():
                             market_ff = full_feed.get("marketFF", {})
                             index_ff = full_feed.get("indexFF", {})
 
-                            ltpc = market_ff.get("ltpc", index_ff.get("ltpc", {}))
+                            ltpc = market_ff.get("ltp", index_ff.get("ltp", {}))
                             oi = market_ff.get("oi", 0)
 
                             volume = 0
@@ -978,7 +978,7 @@ async def get_options_orders_analysis():
             # Check conditions for updating
             need_update = False
 
-            if abs(percent_change) > 91 and current_status != 'Done':
+            if percent_change > 90 and current_status != 'Done':
                 current_status = 'Done'  # Update for response
                 need_update = True
 
