@@ -225,7 +225,7 @@ async def websocket_worker():
                             market_ff = full_feed.get("marketFF", {})
                             index_ff = full_feed.get("indexFF", {})
 
-                            ltpc = market_ff.get("ltp", index_ff.get("ltp", {}))
+                            ltpc = market_ff.get("ltpc", index_ff.get("ltpc", {}))
                             oi = market_ff.get("oi", 0)
 
                             volume = 0
