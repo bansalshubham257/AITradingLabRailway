@@ -987,7 +987,7 @@ async def get_options_orders_analysis():
                 is_less_than_25pct = True
                 need_update = True
 
-            if current_ltp < (stored_ltp * 0.5) and not is_less_than_50pct:
+            if current_ltp < (stored_ltp * 0.59) and not is_less_than_50pct:
                 is_less_than_50pct = True
                 need_update = True
 
