@@ -14,7 +14,7 @@ import websockets
 from google.protobuf.json_format import MessageToDict
 import MarketDataFeed_pb2 as pb
 from config import Config
-from services.database import DatabaseService
+from database import DatabaseService
 import threading
 from queue import Queue, Empty  # Import Empty exception from queue module
 import multiprocessing
