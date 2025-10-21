@@ -14,7 +14,7 @@ import websockets
 from google.protobuf.json_format import MessageToDict
 import MarketDataFeed_pb2 as pb
 from config import Config
-from database import DatabaseService
+from services.database import DatabaseService
 import threading
 from queue import Queue, Empty  # Import Empty exception from queue module
 import multiprocessing
@@ -45,6 +45,13 @@ class UpstoxFeedWorker:
         self.ssl_context.check_hostname = False
         self.ssl_context.verify_mode = ssl.CERT_NONE
         self.running = False
+        
+        # Add token refresh settings
+        self.token_refresh_interval = 3600  # Check for new tokens every 10 minutes
+        self.token_refresh_thread = None
+        self.last_token_refresh = time.time()
+        self.market_open_time = "08:00"  # IST market open time
+        self.market_close_time = "15:30"  # IST market close time
 
         # Connection settings - Updated for multiple connections
         self.MAX_CONNECTIONS = 4  # Fixed number of connections (4)
@@ -108,6 +115,9 @@ class UpstoxFeedWorker:
         self.running = True
         self.db_workers_running = True
 
+        # Start token refresh task first to ensure we have fresh tokens
+        token_refresh_task = asyncio.create_task(self.refresh_tokens_periodically())
+        
         # Check if market is open before starting
         if not self.is_market_open():
             print("Market is closed. Feed worker will wait until market opens.")
@@ -1015,7 +1025,7 @@ class UpstoxFeedWorker:
 
                     # Only process if price is valid and quantities meet threshold
                     print("bid_qty:", bid_qty, "ask_qty:", ask_qty, "stock:", instrument['symbol'], "strike_price:", instrument['strike_price'], "option_type:", instrument['option_type'])
-                    if ltp and ltp >= 9 and (bid_qty > 0 or ask_qty > 0):
+                    if ltp and ltp >= 5 and (bid_qty > 0 or ask_qty > 0):
                         threshold = self.OPTIONS_THRESHOLD * lot_size
                         if bid_qty >= threshold or ask_qty >= threshold:
                             option_order = {
@@ -1099,6 +1109,64 @@ class UpstoxFeedWorker:
             await websocket.send(json.dumps(subscribe_msg).encode('utf-8'))
             print(f"Connection {connection_id}: Subscribed to batch {i+1}/{len(sub_batches)} ({len(sub_batch)} instruments)")
             await asyncio.sleep(0.05)  # Small delay between batches
+
+    async def refresh_tokens_periodically(self):
+        """Refresh access tokens once before market open."""
+        while self.running:
+            try:
+                # Get current time in IST
+                now = datetime.now(pytz.timezone('Asia/Kolkata'))
+                current_time = now.time()
+                
+                # Only refresh tokens in the early morning before market open (6:00-8:30 AM IST)
+                is_refresh_window = datetime.time(6, 0) <= current_time <= datetime.time(8, 30)
+                
+                if is_refresh_window:
+                    # Check if we haven't refreshed tokens today
+                    last_refresh_time = datetime.fromtimestamp(self.last_token_refresh, pytz.timezone('Asia/Kolkata'))
+                    if last_refresh_time.date() < now.date():
+                        print("Refreshing access tokens before market open")
+                        
+                        # Fetch new tokens from the database
+                        new_access_token_1 = self.db.get_access_token(account_id=1)
+                        new_access_token_3 = self.db.get_access_token(account_id=3)
+                        
+                        updated_tokens = False
+                        
+                        if new_access_token_1 and new_access_token_1 != self.access_token_1:
+                            print(f"Updated access token (ID=1): ...{new_access_token_1[-4:]}")
+                            self.access_token_1 = new_access_token_1
+                            updated_tokens = True
+                            
+                        if new_access_token_3 and new_access_token_3 != self.access_token_3:
+                            print(f"Updated access token (ID=3): ...{new_access_token_3[-4:]}")
+                            self.access_token_3 = new_access_token_3
+                            updated_tokens = True
+                            
+                        if updated_tokens:
+                            # Update the access tokens list
+                            self.access_tokens = []
+                            if self.access_token_1:
+                                self.access_tokens.append(self.access_token_1)
+                            if self.access_token_3:
+                                self.access_tokens.append(self.access_token_3)
+                            print("Access tokens updated before market open")
+                        else:
+                            print("No token updates found in database")
+                            
+                        # Update last refresh time even if tokens didn't change
+                        self.last_token_refresh = time.time()
+                        
+                # Sleep for longer during the day when token refresh isn't needed
+                # Check more frequently during the refresh window
+                if is_refresh_window:
+                    await asyncio.sleep(60)  # Check every minute during refresh window
+                else:
+                    await asyncio.sleep(1800)  # Check every 30 minutes outside refresh window
+                    
+            except Exception as e:
+                print(f"Error in token refresh task: {e}")
+                await asyncio.sleep(300)  # On error, retry after 5 minutes
 
 async def main():
     db_service = DatabaseService()
