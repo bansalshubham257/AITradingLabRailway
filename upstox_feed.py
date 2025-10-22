@@ -1118,12 +1118,16 @@ class UpstoxFeedWorker:
                 now = datetime.now(pytz.timezone('Asia/Kolkata'))
                 current_time = now.time()
                 
-                # Only refresh tokens in the early morning before market open (6:00-8:30 AM IST)
-                is_refresh_window = datetime.time(6, 0) <= current_time <= datetime.time(8, 30)
+                # Only refresh tokens in the early morning before market open (5:00-8:30 AM IST)
+                is_refresh_window = Config.TOKEN_MARKET_OPEN <= now.time() <= Config.TOKEN_MARKET_CLOSE
                 
                 if is_refresh_window:
                     # Check if we haven't refreshed tokens today
-                    last_refresh_time = datetime.fromtimestamp(self.last_token_refresh, pytz.timezone('Asia/Kolkata'))
+                    # Convert timestamp to datetime object first
+                    last_refresh_datetime = datetime.fromtimestamp(self.last_token_refresh)
+                    # Then convert to IST timezone for comparison
+                    last_refresh_time = pytz.timezone('Asia/Kolkata').localize(last_refresh_datetime)
+                    
                     if last_refresh_time.date() < now.date():
                         print("Refreshing access tokens before market open")
                         
