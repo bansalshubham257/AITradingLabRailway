@@ -16,6 +16,9 @@ class Config:
     # Market hours configuraion
     MARKET_OPEN = time(9, 0)  # 09:15 AM
     MARKET_CLOSE = time(15, 32)  # 03:30 PM
+
+    TOKEN_MARKET_OPEN = time(6, 0) 
+    TOKEN_MARKET_CLOSE = time(8, 33) 
     
     # Post-market window for financial data collection (3:35 PM - 3:39 PM)
     POST_MARKET_START = time(15, 30)
