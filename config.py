@@ -12,7 +12,7 @@ class Config:
     ACCESS_TOKEN2 = os.getenv('ACCESS_TOKEN2', 'eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIyWEJSUFMiLCJqdGkiOiI2N2VkZjI5OTVlMDFkYTVlZjBjY2Q5ODAiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaWF0IjoxNzQzNjQ3Mzg1LCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3NDM3MTc2MDB9.Ra7Bclq3ysxWNmi7oJol_1mcgz1sCK7WWgFG-59ZFmM')
 
     # Other configurations
-    EXPIRY_DATE = "2025-12-30"
+    EXPIRY_DATE = "2025-11-25"
     # Market hours configuraion
     MARKET_OPEN = time(9, 0)  # 09:15 AM
     MARKET_CLOSE = time(15, 32)  # 03:30 PM
@@ -44,5 +44,5 @@ class Config:
 
     # These should include all relevant expiry dates for different instruments
     INSTRUMENT_EXPIRIES = [
-        "2025-12-30"
+        "2025-11-25"
     ]
