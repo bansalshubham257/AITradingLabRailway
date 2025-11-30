@@ -8,7 +8,7 @@ class Config:
     WORKER_URL = os.getenv('WORKER_URL', '')
     
     # Upstox API configuration
-    ACCESS_TOKEN = os.getenv('ACCESS_TOKEN', '.eyJzdiOiIyWEJSUFMiLqdGkiOiI2NDFkYTVlZjBjY2Q5ODAiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaWF0IjoxNzQzNjQ3Mzg1LCJpc3MiOiJ1ZGFwaS1nYXRld2F52UiLCJleHAiOjE3NDM3MTc2MDB9.Ra7Bclq3ysxWNmi7oJol_1mcgz1sCK7WWgFG-59ZFmM')
+    ACCESS_TOKEN = os.getenv('ACCESS_TOKEN', '.eyJzdiOiIyWEJSUFMiLqdGkiOiI2NDFkYTVlZjBjpZW50IjpmYWxzZSwiaWF0IjoxNzQzNjQ3Mzg1LCJpc3MiOiJ1ZGFwaS1nYXRld2F52UiLCJleHAiOjE3NDM3MTc2MDB9.Ra7Bclq3ysxWNmi7oJol_1mcgz1sCK7WWgFG-59ZFmM')
     ACCESS_TOKEN2 = os.getenv('ACCESS_TOKEN2', 'eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ..Ra7Bclq3ysxWNmi7oJol_1mcgz1sCK7WWgFG-59ZFmM')
 
     # Other configurations
