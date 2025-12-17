@@ -862,7 +862,7 @@ async def get_options_orders_analysis():
             active_subscription = instrument_keys
 
             # Wait for data to be available (with timeout)
-            timeout = 30  # seconds
+            timeout = 90  # seconds
             start_time = time.time()
 
             while time.time() - start_time < timeout:
@@ -958,6 +958,7 @@ async def get_options_orders_analysis():
             # Get current less than flags and initialize recovery flags
             is_less_than_25pct = order.get('is_less_than_25pct', False)
             is_less_than_50pct = order.get('is_less_than_50pct', False)
+            is_less_than_75pct = order.get('is_less_than_75pct', False)
             is_greater_than_25pct = order.get('is_greater_than_25pct', False)
             is_greater_than_50pct = order.get('is_greater_than_50pct', False)
             is_greater_than_75pct = order.get('is_greater_than_75pct', False)
@@ -979,7 +980,11 @@ async def get_options_orders_analysis():
                 is_less_than_25pct = True
                 need_update = True
 
-            if current_ltp < (stored_ltp * 0.59) and not is_less_than_50pct:
+            if current_ltp < (stored_ltp * 0.75) and not is_less_than_75pct:
+                is_less_than_75pct = True
+                need_update = True
+
+            if current_ltp < (stored_ltp * 0.50) and not is_less_than_50pct:
                 is_less_than_50pct = True
                 need_update = True
 
@@ -1004,6 +1009,7 @@ async def get_options_orders_analysis():
                     'new_status': current_status,
                     'is_less_than_25pct': is_less_than_25pct,
                     'is_less_than_50pct': is_less_than_50pct,
+                    'is_less_than_75pct': is_less_than_75pct,
                     'is_greater_than_25pct': is_greater_than_25pct,
                     'is_greater_than_50pct': is_greater_than_50pct,
                     'is_greater_than_75pct': is_greater_than_75pct,
@@ -1052,6 +1058,7 @@ async def get_options_orders_analysis():
                 'timestamp': order.get('timestamp', ''),
                 'is_less_than_25pct': is_less_than_25pct,  # Include the flag
                 'is_less_than_50pct': is_less_than_50pct,  # Include the flag
+                'is_less_than_75pct': is_less_than_75pct,  
                 'is_greater_than_25pct': is_greater_than_25pct,  # Include the flag
                 'is_greater_than_50pct': is_greater_than_50pct,  # Include the flag
                 'is_greater_than_75pct': is_greater_than_75pct,  # Include the flag
