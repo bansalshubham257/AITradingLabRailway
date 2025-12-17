@@ -209,7 +209,7 @@ async def websocket_worker():
                         print(f"Total subscribed instruments: {len(local_subscribed)}")
 
                     try:
-                        message = await asyncio.wait_for(websocket.recv(), timeout=5)
+                        message = await asyncio.wait_for(websocket.recv(), timeout=25)
                         decoded = decode_protobuf(message)
                         data = MessageToDict(decoded)
                         for instrument, feed in data.get("feeds", {}).items():
