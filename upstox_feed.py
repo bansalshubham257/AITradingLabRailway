@@ -66,8 +66,8 @@ class UpstoxFeedWorker:
         self.connection_tasks = []
 
         # Processing thresholds
-        self.OPTIONS_THRESHOLD = 87
-        self.FUTURES_THRESHOLD = 36
+        self.OPTIONS_THRESHOLD = 117
+        self.FUTURES_THRESHOLD = 936
 
         # Parallel processing settings
         self.MAX_WORKERS = 20
