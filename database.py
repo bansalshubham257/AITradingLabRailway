@@ -399,6 +399,7 @@ class DatabaseService:
                         o.is_greater_than_25pct,
                         o.is_greater_than_50pct,
                         o.is_greater_than_75pct,
+                        o.is_less_than_75pct,
                         o.pcr,
                         i.prev_close
                     FROM options_orders o
@@ -435,8 +436,9 @@ class DatabaseService:
                     'is_greater_than_25pct': r[20] if r[20] is not None else False,
                     'is_greater_than_50pct': r[21] if r[21] is not None else False,
                     'is_greater_than_75pct': r[22] if r[22] is not None else False,
-                    'pcr': r[23] if r[23] is not None else 0.0,
-                    'prev_close': float(r[24]) if r[24] is not None else None
+                    'is_less_than_75pct': r[23] if r[23] is not None else False,
+                    'pcr': r[24] if r[24] is not None else 0.0,
+                    'prev_close': float(r[25]) if r[25] is not None else None
                 } for r in results]
         except Exception as e:
             print(f"Error fetching options orders: {str(e)}")
@@ -477,8 +479,8 @@ class DatabaseService:
             execute_batch(cur, """
                 INSERT INTO options_orders 
                 (symbol, strike_price, option_type, ltp, bid_qty, ask_qty, lot_size, timestamp, 
-                 oi, volume, vega, theta, gamma, delta, iv, pop, status, is_less_than_25pct, is_less_than_50pct, is_greater_than_25pct, is_greater_than_50pct, is_greater_than_75pct)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 oi, volume, vega, theta, gamma, delta, iv, pop, status, is_less_than_25pct, is_less_than_50pct, is_greater_than_25pct, is_greater_than_50pct, is_greater_than_75pct, is_less_than_75pct)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (symbol, strike_price, option_type) DO NOTHING
             """, data, page_size=100)
 
@@ -495,6 +497,7 @@ class DatabaseService:
                     order.get('is_greater_than_25pct', False),
                     order.get('is_greater_than_50pct', False),
                     order.get('is_greater_than_75pct', False),
+                     order.get('is_less_than_75pct', False),
                     order['symbol'], order['strike_price'], order['option_type'])
                     for order in orders_to_update]
 
@@ -505,7 +508,8 @@ class DatabaseService:
                     is_less_than_50pct = %s,
                     is_greater_than_25pct = %s,
                     is_greater_than_50pct = %s,
-                    is_greater_than_75pct = %s
+                    is_greater_than_75pct = %s,
+                    is_less_than_75pct = %s
                 WHERE symbol = %s AND strike_price = %s AND option_type = %s
             """, data, page_size=100)
 
