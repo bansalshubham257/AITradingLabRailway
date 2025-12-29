@@ -1,4 +1,4 @@
-import o
+import os
 from datetime import time
 
 class Config:
@@ -12,7 +12,7 @@ class Config:
     ACCESS_TOKEN2 = os.getenv('ACCESS_TOKEN2', 'eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ..Ra7Bclq3ysxWNmi7oJol_1mcgz1sCK7WWgFG-59ZFmM')
 
     # Other configurations
-    EXPIRY_DATE = "2025-12-30"
+    EXPIRY_DATE = "2026-01-27"
     # Market hours configuraion
     MARKET_OPEN = time(9, 0)  # 09:15 AM
     MARKET_CLOSE = time(15, 32)  # 03:30 PM
@@ -44,5 +44,5 @@ class Config:
 
     # These should include all relevant expiry dates for different instruments
     INSTRUMENT_EXPIRIES = [
-        "2025-12-30"
+        "2026-01-27"
     ]
