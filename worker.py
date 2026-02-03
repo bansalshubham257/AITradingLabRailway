@@ -844,12 +844,12 @@ async def restart_all_websockets():
         raise HTTPException(status_code=500, detail=f"Error restarting WebSockets: {str(e)}")
 
 @app.get("/api/options-orders-analysis")
-async def get_options_orders_analysis(limit: int = 100, offset: int = 0, symbol: Optional[str] = None,
+async def get_options_orders_analysis(limit: int = 500, offset: int = 0, symbol: Optional[str] = None,
                                        wait_for_data: bool = False, detailed: bool = True):
     """Fetch options orders with live market data - OPTIMIZED VERSION with pagination.
 
     Args:
-        limit: Number of records to return (default: 100, max: 500)
+        limit: Number of records to return (default: 500, max: 2500)
         offset: Offset for pagination (default: 0)
         symbol: Optional symbol filter to reduce data
         wait_for_data: Whether to wait for live market data (default: False - return immediately with cached data)
@@ -861,8 +861,8 @@ async def get_options_orders_analysis(limit: int = 100, offset: int = 0, symbol:
         import time as time_module
         start_time = time_module.time()
 
-        # Cap limit to avoid excessive data transfer
-        limit = min(max(1, limit), 500)
+        # Cap limit to avoid excessive data transfer - increased to 2500 for larger datasets
+        limit = min(max(1, limit), 2500)
         offset = max(0, offset)
 
         # Get options orders with pagination and optional filtering
