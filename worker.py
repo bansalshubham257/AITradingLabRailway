@@ -844,272 +844,245 @@ async def restart_all_websockets():
         raise HTTPException(status_code=500, detail=f"Error restarting WebSockets: {str(e)}")
 
 @app.get("/api/options-orders-analysis")
-async def get_options_orders_analysis(limit: int = 500, offset: int = 0, symbol: Optional[str] = None,
-                                       wait_for_data: bool = False, detailed: bool = True):
-    """Fetch options orders with live market data - OPTIMIZED VERSION with pagination.
-
-    Args:
-        limit: Number of records to return (default: 500, max: 2500)
-        offset: Offset for pagination (default: 0)
-        symbol: Optional symbol filter to reduce data
-        wait_for_data: Whether to wait for live market data (default: False - return immediately with cached data)
-        detailed: Whether to include detailed calculations (default: True)
-
-    Returns pagination support to handle large datasets efficiently.
-    """
+async def get_options_orders_analysis():
+    """Fetch options orders with live market data."""
     try:
-        import time as time_module
-        start_time = time_module.time()
-
-        # Cap limit to avoid excessive data transfer - increased to 2500 for larger datasets
-        limit = min(max(1, limit), 2500)
-        offset = max(0, offset)
-
-        # Get options orders with pagination and optional filtering
-        if hasattr(db_service, 'get_full_options_orders_paginated'):
-            options_orders = db_service.get_full_options_orders_paginated(limit=limit, offset=offset, symbol=symbol)
-        else:
-            # Fallback to non-paginated version if not available
-            all_orders = db_service.get_full_options_orders()
-            if symbol:
-                options_orders = [o for o in all_orders if o['symbol'] == symbol]
-            else:
-                options_orders = all_orders
-            # Apply pagination manually
-            options_orders = options_orders[offset:offset+limit]
-
-        # Get total count for pagination
-        if hasattr(db_service, 'get_full_options_orders_count'):
-            total_count = db_service.get_full_options_orders_count(symbol=symbol)
-        else:
-            # Fallback: count manually
-            if symbol:
-                total_count = len([o for o in db_service.get_full_options_orders() if o['symbol'] == symbol])
-            else:
-                total_count = len(db_service.get_full_options_orders())
-
+        # First get all options orders from the database
+        options_orders = db_service.get_full_options_orders()
         if not options_orders:
-            return {
-                "success": True,
-                "data": [],
-                "pagination": {
-                    "limit": limit,
-                    "offset": offset,
-                    "count": 0,
-                    "total": total_count
-                },
-                "timestamp": datetime.now().isoformat()
-            }
+            return {"data": []}
 
         # Get all instrument keys from the options orders
         instrument_keys = [order['instrument_key'] for order in options_orders if order.get('instrument_key')]
 
-        # Update active subscription and wait for market data (with short timeout)
+        # If we have instrument keys, fetch live market data for them
         if instrument_keys:
+            # Update the active subscription
             global active_subscription
             active_subscription = instrument_keys
 
-            if wait_for_data:
-                # Wait for data with adaptive timeout based on number of instruments
-                timeout = min(30, int(5 + len(instrument_keys) * 0.1))  # ~0.1s per instrument, max 30s
-                start_wait = time_module.time()
+            # Wait for data to be available (with timeout)
+            timeout = 90  # seconds
+            start_time = time.time()
 
-                while time_module.time() - start_wait < timeout:
-                    available = sum(1 for key in instrument_keys if key in market_data)
-                    # Return early if we have most data or timeout approaching
-                    if available >= len(instrument_keys) * 0.8 or time_module.time() - start_wait > timeout * 0.8:
-                        break
-                    await asyncio.sleep(0.1)
-            else:
-                # Short 2-second wait for background market data updates
-                await asyncio.sleep(0.1)
+            while time.time() - start_time < timeout:
+                # Check if we have data for all requested keys
+                if all(key in market_data for key in instrument_keys):
+                    break
+                await asyncio.sleep(0.5)
 
-        # Prepare response using vectorized operations where possible
+        # Prepare the response by combining database and live data
         response_data = []
-        orders_to_update = []
-        now = datetime.now()
+        orders_to_update = []  # Track orders that need status update
 
         for order in options_orders:
             instrument_key = order.get('instrument_key')
             live_data = market_data.get(instrument_key, {}) if instrument_key else {}
 
-            # ===== OPTIMIZED: Batch calculate days captured =====
+            # Calculate days captured from timestamp
             days_captured = 'N/A'
             if order.get('timestamp'):
                 try:
+                    # Parse the timestamp as UTC
                     capture_date = datetime.fromisoformat(order['timestamp'].replace('Z', '+00:00'))
+
+                    # Make sure current_date is also timezone-aware (UTC)
                     current_date = datetime.now(capture_date.tzinfo)
+
+                    # Now both dates have timezone info, we can safely subtract
                     days_captured = (current_date - capture_date).days
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Error calculating days captured: {e}")
 
-            # ===== OPTIMIZED: Use faster float conversion with defaults =====
-            stored_ltp = float(order.get('ltp') or 0)
-            current_ltp = float(live_data.get('ltp') or stored_ltp)
+            # Explicitly convert values to float to avoid decimal.Decimal vs float issues
+            try:
+                stored_ltp = float(order.get('ltp', 0) or 0)
+                current_ltp = float(live_data.get('ltp', stored_ltp) or stored_ltp)
 
-            # ===== OPTIMIZED: Single percent_change calculation =====
-            percent_change = ((current_ltp - stored_ltp) / stored_ltp * 100) if stored_ltp != 0 else 0
+                percent_change = 0
+                if stored_ltp and stored_ltp != 0:
+                    percent_change = ((current_ltp - stored_ltp) / stored_ltp) * 100
+            except (TypeError, ValueError) as e:
+                print(f"Error calculating percent change: {e}, stored_ltp={order.get('ltp')}, current_ltp={live_data.get('ltp')}")
+                stored_ltp = 0
+                current_ltp = 0
+                percent_change = 0
 
-            # ===== OPTIMIZED: Single todays_return calculation =====
-            prev_close = float(order.get('prev_close') or 0)
-            todays_return = ((current_ltp - prev_close) / prev_close * 100) if prev_close > 0 else 0
+            # Calculate today's return using prev_close
+            todays_return = 0
+            try:
+                prev_close = float(order.get('prev_close', 0) or 0)
+                if prev_close and prev_close > 0:
+                    todays_return = ((current_ltp - prev_close) / prev_close) * 100
+            except (TypeError, ValueError) as e:
+                print(f"Error calculating today's return: {e}, prev_close={order.get('prev_close')}, current_ltp={current_ltp}")
+                todays_return = 0
 
-            # ===== OPTIMIZED: Batch OI/volume calculations =====
-            live_oi = float(live_data.get('oi') or 0)
-            live_volume = float(live_data.get('volume') or 0)
-            original_oi = float(order.get('oi') or 0)
-            original_volume = float(order.get('volume') or 0)
+            # Get live OI and volume from market data
+            live_oi = float(live_data.get('oi', 0) or 0)
+            live_volume = float(live_data.get('volume', 0) or 0)
 
+            # Get original OI and volume
+            original_oi = float(order.get('oi', 0) or 0)
+            original_volume = float(order.get('volume', 0) or 0)
+
+            # Calculate OI and volume changes
             oi_change = ((live_oi - original_oi) / original_oi * 100) if original_oi != 0 else 0
             volume_change = ((live_volume - original_volume) / original_volume * 100) if original_volume != 0 else 0
 
-            # ===== OPTIMIZED: Batch greek calculations =====
-            original_iv = float(order.get('iv') or 0)
-            original_delta = float(order.get('delta') or 0)
-            original_gamma = float(order.get('gamma') or 0)
-            original_theta = float(order.get('theta') or 0)
-            original_vega = float(order.get('vega') or 0)
+            # Get current and original greek values
+            original_iv = float(order.get('iv', 0) or 0)
+            original_delta = float(order.get('delta', 0) or 0)
+            original_gamma = float(order.get('gamma', 0) or 0)
+            original_theta = float(order.get('theta', 0) or 0)
+            original_vega = float(order.get('vega', 0) or 0)
 
-            current_iv = float(order.get('current_iv') or original_iv)
-            current_delta = float(order.get('current_delta') or original_delta)
-            current_gamma = float(order.get('current_gamma') or original_gamma)
-            current_theta = float(order.get('current_theta') or original_theta)
-            current_vega = float(order.get('current_vega') or original_vega)
+            # Get current greek values - these would typically come from a live options pricing API
+            # For now, we'll use the stored values
+            current_iv = float(order.get('current_iv', original_iv) or original_iv)
+            current_delta = float(order.get('current_delta', original_delta) or original_delta)
+            current_gamma = float(order.get('current_gamma', original_gamma) or original_gamma)
+            current_theta = float(order.get('current_theta', original_theta) or original_theta)
+            current_vega = float(order.get('current_vega', original_vega) or original_vega)
 
-            # ===== OPTIMIZED: Single-pass threshold checks =====
+            # Calculate greek changes
+            iv_change = ((current_iv - original_iv) / original_iv * 100) if original_iv != 0 else 0
+            delta_change = ((current_delta - original_delta) / original_delta * 100) if original_delta != 0 else 0
+            gamma_change = ((current_gamma - original_gamma) / original_gamma * 100) if original_gamma != 0 else 0
+            theta_change = ((current_theta - original_theta) / original_theta * 100) if original_theta != 0 else 0
+            vega_change = ((current_vega - original_vega) / original_vega * 100) if original_vega != 0 else 0
+
+            # Check if status should be "Done" (> 100% change)
             current_status = order.get('status', 'Open')
-            threshold_multipliers = {
-                'is_less_than_25pct': (0.25, lambda curr, stored, flag: curr < stored * 0.25 and not flag),
-                'is_less_than_50pct': (0.50, lambda curr, stored, flag: curr < stored * 0.50 and not flag),
-                'is_less_than_75pct': (0.75, lambda curr, stored, flag: curr < stored * 0.75 and not flag),
-                'is_greater_than_25pct': (1.25, lambda curr, stored, flag: curr > stored * 1.25 and not flag),
-                'is_greater_than_50pct': (1.50, lambda curr, stored, flag: curr > stored * 1.50 and not flag),
-                'is_greater_than_75pct': (1.75, lambda curr, stored, flag: curr > stored * 1.75 and not flag),
-            }
 
-            # Get current threshold flags
-            threshold_flags = {k: order.get(k, False) for k in threshold_multipliers.keys()}
+            # Get current less than flags and initialize recovery flags
+            is_less_than_25pct = order.get('is_less_than_25pct', False)
+            is_less_than_50pct = order.get('is_less_than_50pct', False)
+            is_less_than_75pct = order.get('is_less_than_75pct', False)
+            is_greater_than_25pct = order.get('is_greater_than_25pct', False)
+            is_greater_than_50pct = order.get('is_greater_than_50pct', False)
+            is_greater_than_75pct = order.get('is_greater_than_75pct', False)
 
-            need_update = False
-
-            # Check Done status
-            if percent_change > 90 and current_status != 'Done':
-                current_status = 'Done'
-                need_update = True
-
-            # Check all thresholds at once
-            for flag_name, flag_value in threshold_flags.items():
-                if not flag_value:  # Only check if flag is not already set
-                    # Check threshold
-                    if 'less_than' in flag_name:
-                        # Extract number from flag name like 'is_less_than_25pct' -> extract '25'
-                        threshold_str = flag_name.split('_')[3].replace('pct', '')  # '25pct' -> '25'
-                        threshold = float(threshold_str) / 100  # Convert to decimal (0.25)
-                        if current_ltp < (stored_ltp * threshold):
-                            threshold_flags[flag_name] = True
-                            need_update = True
-                    elif 'greater_than' in flag_name:
-                        # Extract number from flag name like 'is_greater_than_25pct' -> extract '25'
-                        threshold_str = flag_name.split('_')[3].replace('pct', '')  # '25pct' -> '25'
-                        threshold = float(threshold_str) / 100  # Convert to decimal (0.25)
-                        if current_ltp > (stored_ltp * (1 + threshold)):
-                            threshold_flags[flag_name] = True
-                            need_update = True
-
-            # Track lowest point
+            # Track lowest price point
             lowest_point = order.get('lowest_point', min(current_ltp, stored_ltp))
             if current_ltp < lowest_point:
                 lowest_point = current_ltp
 
-            # Only queue update if needed
+            # Check conditions for updating
+            need_update = False
+
+            if percent_change > 90 and current_status != 'Done':
+                current_status = 'Done'  # Update for response
+                need_update = True
+
+            # Calculate if price is less than 25% or 50% of original price
+            if current_ltp < (stored_ltp * 0.25) and not is_less_than_25pct:
+                is_less_than_25pct = True
+                need_update = True
+
+            if current_ltp < (stored_ltp * 0.75) and not is_less_than_75pct:
+                is_less_than_75pct = True
+                need_update = True
+
+            if current_ltp < (stored_ltp * 0.50) and not is_less_than_50pct:
+                is_less_than_50pct = True
+                need_update = True
+
+            if current_ltp > (stored_ltp * 1.25) and not is_greater_than_25pct:
+                is_greater_than_25pct = True
+                need_update = True
+
+            if current_ltp > (stored_ltp * 1.50) and not is_greater_than_50pct:
+                is_greater_than_50pct = True
+                need_update = True
+
+            if current_ltp > (stored_ltp * 1.75) and not is_greater_than_75pct:
+                is_greater_than_75pct = True
+                need_update = True
+
+            # Mark for update in database if needed
             if need_update:
                 orders_to_update.append({
                     'symbol': order['symbol'],
                     'strike_price': order['strike_price'],
                     'option_type': order['option_type'],
                     'new_status': current_status,
-                    **threshold_flags,
+                    'is_less_than_25pct': is_less_than_25pct,
+                    'is_less_than_50pct': is_less_than_50pct,
+                    'is_less_than_75pct': is_less_than_75pct,
+                    'is_greater_than_25pct': is_greater_than_25pct,
+                    'is_greater_than_50pct': is_greater_than_50pct,
+                    'is_greater_than_75pct': is_greater_than_75pct,
                     'lowest_point': lowest_point
                 })
 
-            # ===== Build response with only necessary fields =====
-            if detailed:
-                response_item = {
-                    'symbol': order['symbol'],
-                    'strike_price': float(order['strike_price']),
-                    'option_type': order['option_type'],
-                    'stored_ltp': stored_ltp,
-                    'current_ltp': current_ltp,
-                    'percent_change': round(percent_change, 2),
-                    'todays_return': round(todays_return, 2),
-                    'status': current_status,
-                    'daysCaptured': days_captured,
-                    'oi': live_oi,
-                    'original_oi': original_oi,
-                    'oi_change': round(oi_change, 2),
-                    'volume': live_volume,
-                    'original_volume': original_volume,
-                    'volume_change': round(volume_change, 2),
-                    'iv': current_iv,
-                    'original_iv': original_iv,
-                    'delta': current_delta,
-                    'original_delta': original_delta,
-                    'gamma': current_gamma,
-                    'original_gamma': original_gamma,
-                    'theta': current_theta,
-                    'original_theta': original_theta,
-                    'vega': current_vega,
-                    'original_vega': original_vega,
-                    'pop': float(order.get('pop') or 0),
-                    'bidQ': float(live_data.get('bidQ') or 0),
-                    'askQ': float(live_data.get('askQ') or 0),
-                    'lot_size': float(order.get('lot_size') or 1),
-                    'instrument_key': instrument_key,
-                    'timestamp': order.get('timestamp', ''),
-                    **threshold_flags,
-                    'lowest_point': lowest_point,
-                    'pcr': float(order.get('pcr') or 0),
-                    'prev_close': prev_close
-                }
-            else:
-                # Compact response with essential fields only
-                response_item = {
-                    'symbol': order['symbol'],
-                    'strike_price': float(order['strike_price']),
-                    'option_type': order['option_type'],
-                    'current_ltp': current_ltp,
-                    'percent_change': round(percent_change, 2),
-                    'status': current_status,
-                    'oi': live_oi,
-                    'volume': live_volume
-                }
+            # Safely convert all values to appropriate types
+            response_data.append({
+                'symbol': order['symbol'],
+                'strike_price': float(order['strike_price']),
+                'option_type': order['option_type'],
+                'stored_ltp': stored_ltp,
+                'current_ltp': current_ltp,
+                'percent_change': percent_change,
+                'todays_return': todays_return,  # Add today's return to response
+                'status': current_status,  # Use the current status (could be "Done" now)
+                'daysCaptured': days_captured,  # Added days captured
+                'oi': live_oi,  # Use live OI
+                'original_oi': original_oi,  # Original OI
+                'oi_change': oi_change,  # OI change percentage
+                'volume': live_volume,  # Use live volume
+                'original_volume': original_volume,  # Original volume
+                'volume_change': volume_change,  # Volume change percentage
+                'iv': current_iv,
+                'original_iv': original_iv,
+                'iv_change': iv_change,
+                'delta': current_delta,
+                'original_delta': original_delta,
+                'delta_change': delta_change,
+                'gamma': current_gamma,
+                'original_gamma': original_gamma,
+                'gamma_change': gamma_change,
+                'theta': current_theta,
+                'original_theta': original_theta,
+                'theta_change': theta_change,
+                'vega': current_vega,
+                'original_vega': original_vega,
+                'vega_change': vega_change,
+                'pop': float(order.get('pop', 0) or 0),
+                'stored_bidq': float(order.get('bid_qty', 0) or 0),
+                'stored_askq': float(order.get('ask_qty', 0) or 0),
+                'bidQ': float(live_data.get('bidQ', 0) or 0),
+                'askQ': float(live_data.get('askQ', 0) or 0),
+                'lot_size': float(order.get('lot_size', 1) or 1),
+                'instrument_key': instrument_key,
+                'timestamp': order.get('timestamp', ''),
+                'is_less_than_25pct': is_less_than_25pct,  # Include the flag
+                'is_less_than_50pct': is_less_than_50pct,  # Include the flag
+                'is_less_than_75pct': is_less_than_75pct,  
+                'is_greater_than_25pct': is_greater_than_25pct,  # Include the flag
+                'is_greater_than_50pct': is_greater_than_50pct,  # Include the flag
+                'is_greater_than_75pct': is_greater_than_75pct,  # Include the flag
+                'lowest_point': lowest_point,  # Include the lowest point
+                'role': order.get('role', 'Unknown'),  # Include role if available
+                'pcr': float(order.get('pcr', 0) or 0),
+                'prev_close': float(order.get('prev_close', 0) or 0)
+            })
 
-            response_data.append(response_item)
-
-        # Batch update database if needed
+        # Update status in database for orders that need it
         if orders_to_update:
+            # Call database service to update statuses
             db_service.update_options_orders_status(orders_to_update)
             print(f"Updated status for {len(orders_to_update)} orders")
-
-        elapsed = time_module.time() - start_time
-        print(f"Options analysis completed in {elapsed:.2f}s for {len(response_data)} orders")
 
         return {
             "success": True,
             "data": response_data,
-            "pagination": {
-                "limit": limit,
-                "offset": offset,
-                "count": len(response_data),
-                "total": total_count
-            },
-            "timestamp": datetime.now().isoformat(),
-            "processing_time_ms": round(elapsed * 1000, 2)
+            "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
         print(f"Error in options orders analysis: {str(e)}")
         import traceback
-        traceback.print_exc()
+        traceback.print_exc()  # Add traceback for better debugging
         raise HTTPException(status_code=500, detail=str(e))
 
 def close_all_websockets_sync():
