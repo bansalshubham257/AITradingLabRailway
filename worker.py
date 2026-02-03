@@ -878,6 +878,16 @@ async def get_options_orders_analysis(limit: int = 500, offset: int = 0, symbol:
             # Apply pagination manually
             options_orders = options_orders[offset:offset+limit]
 
+        # Get total count for pagination
+        if hasattr(db_service, 'get_full_options_orders_count'):
+            total_count = db_service.get_full_options_orders_count(symbol=symbol)
+        else:
+            # Fallback: count manually
+            if symbol:
+                total_count = len([o for o in db_service.get_full_options_orders() if o['symbol'] == symbol])
+            else:
+                total_count = len(db_service.get_full_options_orders())
+
         if not options_orders:
             return {
                 "success": True,
@@ -885,7 +895,8 @@ async def get_options_orders_analysis(limit: int = 500, offset: int = 0, symbol:
                 "pagination": {
                     "limit": limit,
                     "offset": offset,
-                    "total": 0
+                    "count": 0,
+                    "total": total_count
                 },
                 "timestamp": datetime.now().isoformat()
             }
@@ -1089,7 +1100,8 @@ async def get_options_orders_analysis(limit: int = 500, offset: int = 0, symbol:
             "pagination": {
                 "limit": limit,
                 "offset": offset,
-                "count": len(response_data)
+                "count": len(response_data),
+                "total": total_count
             },
             "timestamp": datetime.now().isoformat(),
             "processing_time_ms": round(elapsed * 1000, 2)
