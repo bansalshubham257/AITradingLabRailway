@@ -401,15 +401,18 @@ class DatabaseService:
                         o.is_greater_than_75pct,
                         o.is_less_than_75pct,
                         o.pcr,
-                        i.prev_close
+                        i.prev_close,
+                        i.tradingsymbol
                     FROM options_orders o
                     LEFT JOIN instrument_keys i ON 
                         o.symbol = i.symbol AND 
                         o.strike_price = i.strike_price AND 
                         o.option_type = i.option_type
-                    WHERE (o.symbol NOT IN ('NIFTY', 'SENSEX')) OR
-                          (o.symbol IN ('NIFTY', 'SENSEX') AND 
-                           i.expiry_date IN (SELECT nearest_expiry FROM nearest_expiry WHERE nearest_expiry.symbol = o.symbol))
+                    WHERE (o.status IS NULL OR o.status != 'done')
+                      AND ((o.symbol NOT IN ('NIFTY', 'SENSEX')) OR
+                           (o.symbol IN ('NIFTY', 'SENSEX') AND 
+                            i.expiry_date IN (SELECT nearest_expiry FROM nearest_expiry WHERE nearest_expiry.symbol = o.symbol)))
+                    ORDER BY o.timestamp DESC
                 """)
                 results = cur.fetchall()
                 return [{
@@ -438,10 +441,116 @@ class DatabaseService:
                     'is_greater_than_75pct': r[22] if r[22] is not None else False,
                     'is_less_than_75pct': r[23] if r[23] is not None else False,
                     'pcr': r[24] if r[24] is not None else 0.0,
-                    'prev_close': float(r[25]) if r[25] is not None else None
+                    'prev_close': float(r[25]) if r[25] is not None else None,
+                    'tradingsymbol': r[26] if r[26] else None
                 } for r in results]
         except Exception as e:
             print(f"Error fetching options orders: {str(e)}")
+            return []
+
+    def get_full_options_orders_paginated(self, limit=100, offset=0, symbol=None):
+        """Get options orders with pagination and optional symbol filtering - OPTIMIZED VERSION"""
+        try:
+            with self._get_cursor() as cur:
+                # Build WHERE clause dynamically
+                where_conditions = ["(o.status IS NULL OR o.status != 'done')"]
+                params = []
+
+                if symbol:
+                    where_conditions.append("o.symbol = %s")
+                    params.append(symbol)
+
+                where_clause = " AND ".join(where_conditions)
+
+                # Add NIFTY/SENSEX special handling
+                nifty_sensex_condition = """
+                    AND ((o.symbol NOT IN ('NIFTY', 'SENSEX')) OR
+                         (o.symbol IN ('NIFTY', 'SENSEX') AND 
+                          i.expiry_date IN (
+                              SELECT MIN(expiry_date)
+                              FROM instrument_keys
+                              WHERE symbol IN ('NIFTY', 'SENSEX')
+                                AND expiry_date >= CURRENT_DATE
+                                AND option_type IN ('CE', 'PE')
+                                AND symbol = o.symbol
+                              GROUP BY symbol
+                          )
+                         )
+                    )
+                """
+
+                cur.execute(f"""
+                    SELECT 
+                        o.symbol, 
+                        o.strike_price, 
+                        o.option_type, 
+                        o.ltp, 
+                        o.bid_qty, 
+                        o.ask_qty, 
+                        o.lot_size, 
+                        o.timestamp,
+                        i.instrument_key,
+                        o.oi,
+                        o.volume,
+                        o.vega,
+                        o.theta,
+                        o.gamma,
+                        o.delta,
+                        o.iv,
+                        o.pop,
+                        o.status,
+                        o.is_less_than_25pct,
+                        o.is_less_than_50pct,
+                        o.is_greater_than_25pct,
+                        o.is_greater_than_50pct,
+                        o.is_greater_than_75pct,
+                        o.is_less_than_75pct,
+                        o.pcr,
+                        i.prev_close,
+                        i.tradingsymbol
+                    FROM options_orders o
+                    LEFT JOIN instrument_keys i ON 
+                        o.symbol = i.symbol AND 
+                        o.strike_price = i.strike_price AND 
+                        o.option_type = i.option_type
+                    WHERE {where_clause}
+                    {nifty_sensex_condition}
+                    ORDER BY o.timestamp DESC
+                    LIMIT %s OFFSET %s
+                """, params + [limit, offset])
+
+                results = cur.fetchall()
+                return [{
+                    'symbol': r[0],
+                    'strike_price': r[1],
+                    'option_type': r[2],
+                    'ltp': r[3],
+                    'bid_qty': r[4],
+                    'ask_qty': r[5],
+                    'lot_size': r[6],
+                    'timestamp': r[7].isoformat() if r[7] else None,
+                    'instrument_key': r[8],
+                    'oi': r[9],
+                    'volume': r[10],
+                    'vega': r[11],
+                    'theta': r[12],
+                    'gamma': r[13],
+                    'delta': r[14],
+                    'iv': r[15],
+                    'pop': r[16],
+                    'status': r[17] if r[17] else 'Open',
+                    'is_less_than_25pct': r[18] if r[18] is not None else False,
+                    'is_less_than_50pct': r[19] if r[19] is not None else False,
+                    'is_greater_than_25pct': r[20] if r[20] is not None else False,
+                    'is_greater_than_50pct': r[21] if r[21] is not None else False,
+                    'is_greater_than_75pct': r[22] if r[22] is not None else False,
+                    'is_less_than_75pct': r[23] if r[23] is not None else False,
+                    'pcr': r[24] if r[24] is not None else 0.0,
+                    'prev_close': float(r[25]) if r[25] is not None else None,
+                    'tradingsymbol': r[26] if r[26] else None
+                } for r in results]
+        except Exception as e:
+            print(f"Error fetching paginated options orders: {str(e)}")
             return []
 
     def save_options_data(self, symbol, orders):
@@ -497,7 +606,7 @@ class DatabaseService:
                     order.get('is_greater_than_25pct', False),
                     order.get('is_greater_than_50pct', False),
                     order.get('is_greater_than_75pct', False),
-                     order.get('is_less_than_75pct', False),
+                    order.get('is_less_than_75pct', False),
                     order['symbol'], order['strike_price'], order['option_type'])
                     for order in orders_to_update]
 
@@ -2624,10 +2733,10 @@ class DatabaseService:
                     ON CONFLICT (symbol, interval)
                     DO UPDATE SET
                         timestamp = EXCLUDED.timestamp,
-                        open = EXCLUDED.open, 
-                        high = EXCLUDED.high, 
+                        open = EXCLUDED.open,
+                        high = EXCLUDED.high,
                         low = EXCLUDED.low,
-                        close = EXCLUDED.close, 
+                        close = EXCLUDED.close,
                         volume = EXCLUDED.volume,
                         price_change = EXCLUDED.price_change,
                         percent_change = EXCLUDED.percent_change,
@@ -2698,15 +2807,15 @@ class DatabaseService:
         try:
             with self._get_cursor() as cur:
                 cur.execute("""
-                    SELECT 
-                        instrument_key, 
-                        symbol, 
-                        strike_price, 
-                        expiry_date as expiry, 
-                        option_type, 
+                    SELECT
+                        instrument_key,
+                        symbol,
+                        strike_price,
+                        expiry_date as expiry,
+                        option_type,
                         prev_close as last_close
-                    FROM instrument_keys 
-                    WHERE symbol = %s 
+                    FROM instrument_keys
+                    WHERE symbol = %s
                     AND (option_type = 'CE' OR option_type = 'PE')
                     """
                 , (symbol,))
@@ -2733,8 +2842,8 @@ class DatabaseService:
         try:
             with self._get_cursor() as cur:
                 cur.execute("""
-                    SELECT DISTINCT symbol 
-                    FROM instrument_keys 
+                    SELECT DISTINCT symbol
+                    FROM instrument_keys
                     ORDER BY symbol
                     """
                 )
@@ -2749,8 +2858,8 @@ class DatabaseService:
         try:
             with self._get_cursor() as cur:
                 cur.execute("""
-                    SELECT DISTINCT tradingsymbol 
-                    FROM instrument_keys 
+                    SELECT DISTINCT tradingsymbol
+                    FROM instrument_keys
                     ORDER BY tradingsymbol
                     """
                             )
@@ -2765,10 +2874,10 @@ class DatabaseService:
         try:
             with self._get_cursor() as cur:
                 cur.execute("""
-                    SELECT 
-                        instrument_key, 
-                        symbol, 
-                        exchange, 
+                    SELECT
+                        instrument_key,
+                        symbol,
+                        exchange,
                         tradingsymbol,
                         prev_close as last_close,
                         lot_size
@@ -2796,10 +2905,10 @@ class DatabaseService:
         try:
             with self._get_cursor() as cur:
                 cur.execute("""
-                    SELECT 
-                        instrument_key, 
-                        symbol, 
-                        exchange, 
+                    SELECT
+                        instrument_key,
+                        symbol,
+                        exchange,
                         prev_close as last_close,
                         lot_size
                     FROM instrument_keys
@@ -2826,10 +2935,10 @@ class DatabaseService:
         try:
             with self._get_cursor() as cur:
                 cur.execute("""
-                    SELECT 
-                        instrument_key, 
-                        symbol, 
-                        exchange, 
+                    SELECT
+                        instrument_key,
+                        symbol,
+                        exchange,
                         tradingsymbol,
                         prev_close as last_close
                     FROM instrument_keys
@@ -2861,17 +2970,17 @@ class DatabaseService:
                     expiry_date = expiry
 
                 cur.execute("""
-                    SELECT 
-                        instrument_key, 
+                    SELECT
+                        instrument_key,
                         symbol,
                         strike_price,
                         expiry_date,
                         option_type,
                         prev_close as last_close
                     FROM instrument_keys
-                    WHERE symbol = %s 
-                    AND expiry_date = %s 
-                    AND strike_price = %s 
+                    WHERE symbol = %s
+                    AND expiry_date = %s
+                    AND strike_price = %s
                     AND option_type = %s
                     LIMIT 1
                 """, (symbol, expiry_date, strike, option_type))
@@ -2895,7 +3004,7 @@ class DatabaseService:
         try:
             with self._get_cursor() as cursor:
                 cursor.execute("""
-                    SELECT id, api_key, api_secret, totp_secret, redirect_uri, username, password, 
+                    SELECT id, api_key, api_secret, totp_secret, redirect_uri, username, password,
                            access_token
                     FROM upstox_accounts
                 """)
@@ -2996,5 +3105,3 @@ class DatabaseService:
         except Exception as e:
             print(f"Error saving upstox account: {str(e)}")
             return False
-
-
