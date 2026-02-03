@@ -991,12 +991,16 @@ async def get_options_orders_analysis(limit: int = 100, offset: int = 0, symbol:
                 if not flag_value:  # Only check if flag is not already set
                     # Check threshold
                     if 'less_than' in flag_name:
-                        threshold = float(flag_name.split('_')[3])
+                        # Extract number from flag name like 'is_less_than_25pct' -> extract '25'
+                        threshold_str = flag_name.split('_')[3].replace('pct', '')  # '25pct' -> '25'
+                        threshold = float(threshold_str) / 100  # Convert to decimal (0.25)
                         if current_ltp < (stored_ltp * threshold):
                             threshold_flags[flag_name] = True
                             need_update = True
                     elif 'greater_than' in flag_name:
-                        threshold = float(flag_name.split('_')[3]) / 100
+                        # Extract number from flag name like 'is_greater_than_25pct' -> extract '25'
+                        threshold_str = flag_name.split('_')[3].replace('pct', '')  # '25pct' -> '25'
+                        threshold = float(threshold_str) / 100  # Convert to decimal (0.25)
                         if current_ltp > (stored_ltp * (1 + threshold)):
                             threshold_flags[flag_name] = True
                             need_update = True
