@@ -15,7 +15,7 @@ class Config:
     EXPIRY_DATE = "2026-05-26"
     # Market hours configuraion
     MARKET_OPEN = time(9, 0)  # 09:15 AM
-    MARKET_CLOSE = time(23, 32)  # 03:30 PM
+    MARKET_CLOSE = time(15, 32)  # 03:30 PM
 
     TOKEN_MARKET_OPEN = time(6, 10) 
     TOKEN_MARKET_CLOSE = time(8, 33) 
@@ -28,7 +28,7 @@ class Config:
     DB_CLEARING_START = time(9, 0)  # 09:00 AM
     DB_CLEARING_END = time(9, 9)  # 09:15 AM
 
-    TRADING_DAYS = {0, 1, 2, 3, 4, 5, 6}  # Monday to Friday
+    TRADING_DAYS = {0, 1, 2, 3, 4}  # Monday to Friday
 
     SENSEX_EXPIRIES = [
         "2000-07-01"
