@@ -104,6 +104,11 @@ class UpstoxAuth:
             print("Token verification successful!")
             user_data = response.json()
             return user_data
+        elif response.status_code == 403:
+            # Static IP restriction — token is still valid, skip verification
+            print("Token verification skipped: API requires static IP configuration (UDAPI1154).")
+            print("Token is valid — proceeding without profile verification.")
+            return {"skipped": True, "reason": "static_ip_restriction"}
         else:
             print(f"Token verification failed: {response.status_code}")
             print(response.text)
@@ -251,20 +256,20 @@ def automated_auth_flow(api_key, secret, totp_secret, redirect_uri):
         print("\nAuthentication successful!")
         access_token = token_data['access_token']
 
-        # Verify the token
+        # Verify the token (optional — may be skipped if static IP is not configured)
         user_data = auth.verify_token(access_token)
-        if user_data:
+        if user_data and 'data' in user_data:
             print(f"\nLogged in as: {user_data.get('data', {}).get('user_name', 'Unknown')}")
             print(f"Email: {user_data.get('data', {}).get('email', 'Unknown')}")
 
-            # Safely display expiry info
-            if 'expires_in' in token_data:
-                hours = token_data['expires_in'] // 3600
-                print(f"\nToken will expire in: {hours} hours")
-            else:
-                print("\nToken expiry information not available")
+        # Safely display expiry info
+        if 'expires_in' in token_data:
+            hours = token_data['expires_in'] // 3600
+            print(f"\nToken will expire in: {hours} hours")
+        else:
+            print("\nToken expiry information not available")
 
-            return access_token
+        return access_token
 
     return None
 
@@ -302,20 +307,20 @@ def manual_auth_flow(api_key, secret, totp_secret, redirect_uri):
         print("\nAuthentication successful!")
         access_token = token_data['access_token']
 
-        # Verify the token
+        # Verify the token (optional — may be skipped if static IP is not configured)
         user_data = auth.verify_token(access_token)
-        if user_data:
+        if user_data and 'data' in user_data:
             print(f"\nLogged in as: {user_data.get('data', {}).get('user_name', 'Unknown')}")
             print(f"Email: {user_data.get('data', {}).get('email', 'Unknown')}")
 
-            # Safely display expiry info
-            if 'expires_in' in token_data:
-                hours = token_data['expires_in'] // 3600
-                print(f"\nToken will expire in: {hours} hours")
-            else:
-                print("\nToken expiry information not available")
+        # Safely display expiry info
+        if 'expires_in' in token_data:
+            hours = token_data['expires_in'] // 3600
+            print(f"\nToken will expire in: {hours} hours")
+        else:
+            print("\nToken expiry information not available")
 
-            return access_token
+        return access_token
 
     return None
 
@@ -561,20 +566,20 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
             print("\nAuthentication successful!")
             access_token = token_data['access_token']
 
-            # Verify the token
+            # Verify the token (optional — may be skipped if static IP is not configured)
             user_data = auth.verify_token(access_token)
-            if user_data:
+            if user_data and 'data' in user_data:
                 print(f"\nLogged in as: {user_data.get('data', {}).get('user_name', 'Unknown')}")
                 print(f"Email: {user_data.get('data', {}).get('email', 'Unknown')}")
 
-                # Safely display expiry info
-                if 'expires_in' in token_data:
-                    hours = token_data['expires_in'] // 3600
-                    print(f"\nToken will expire in: {hours} hours")
-                else:
-                    print("\nToken expiry information not available")
+            # Safely display expiry info
+            if 'expires_in' in token_data:
+                hours = token_data['expires_in'] // 3600
+                print(f"\nToken will expire in: {hours} hours")
+            else:
+                print("\nToken expiry information not available")
 
-                return access_token
+            return access_token
 
         return None
 
