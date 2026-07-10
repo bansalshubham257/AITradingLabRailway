@@ -905,10 +905,21 @@ def process_stock_chunk(stock_chunk, interval, chunk_idx, total_chunks):
     for stock in valid_stocks:
         try:
             # Get data using the shared session
-            data = yf_session.tickers[stock].history(period=period, interval=interval_str)
+            for attempt in range(3):
+                try:
+                    data = yf_session.tickers[stock].history(period=period, interval=interval_str)
+                    if not data.empty:
+                        break
+                    time.sleep(2 ** attempt)
+                except:
+                    time.sleep(2 ** attempt)
+            else:
+                print(f"No data for {stock} {interval} after 3 retries")
+                continue
 
             # Fetch company info data
             info_data = yf_session.tickers[stock].info
+            time.sleep(0.3)
 
             # The 52-week high/low data will be calculated inside the update_stock_data method
             # Only for daily interval data (to avoid redundant calculations)
