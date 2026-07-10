@@ -1403,7 +1403,6 @@ def run_daily_token_refresh():
 
 def run_db_clearing_worker():
     """Background worker that runs during the configured window to clear old database entries."""
-    run_stock_data_updater_copy()
     last_clear_date = None
     ist = pytz.timezone('Asia/Kolkata')
 
@@ -1439,24 +1438,22 @@ def run_db_clearing_worker():
             time.sleep(300)  # Sleep for 5 minutes on error before retrying
 
 
-def run_background_workers():
-    """Run all background workers in separate threads"""
+def start_background_threads():
+    """Start all background threads (non-blocking)."""
 
     option_chain_thread = threading.Thread(target=run_option_chain_worker, daemon=True)
     oi_buildup_thread = threading.Thread(target=option_chain_service.run_analytics_worker, daemon=True)
-    stock_data_thread = threading.Thread(target=run_stock_data_updater_copy, daemon=True)
     scanner_thread = threading.Thread(target=run_scanner_worker, daemon=True)
     financials_thread = threading.Thread(target=run_financials_worker, daemon=True)
     db_clearing_thread = threading.Thread(target=run_db_clearing_worker, daemon=True)
-    # Add new instrument keys worker
     instrument_keys_thread = threading.Thread(target=run_instrument_keys_worker, daemon=True)
     prev_close_thread = threading.Thread(target=run_prev_close_worker, daemon=True)
 
     consolidation_thread = threading.Thread(
         target=lambda: run_consolidation_worker(
             database_service,
-            consolidation_interval=1800,  # Run every 30 minutes
-            retention_minutes=15          # Keep last 15 minutes of data intact
+            consolidation_interval=1800,
+            retention_minutes=15
         ),
         daemon=True
     )
@@ -1469,22 +1466,8 @@ def run_background_workers():
 
     token_refresh_thread = threading.Thread(target=run_daily_token_refresh, daemon=True)
 
-    #upstox_feed_thread.start()
-
-    #option_chain_thread.start()
-    #oi_buildup_thread.start()
-    stock_data_thread.start()
     token_refresh_thread.start()
-    #financials_thread.start()
-    #db_clearing_thread.start()
-    #instrument_keys_thread.start()
-    #prev_close_thread.start()
-    #consolidation_thread.start()
     print("Background workers started successfully")
-
-    # Keep main thread alive
-    while True:
-        time.sleep(3600)
 
 @app.route('/api/instrument-keys', methods=['GET'])
 def get_instrument_keys():
@@ -1509,5 +1492,19 @@ def get_instrument_keys():
         logging.error(f"Error fetching instrument keys: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# Run startup sequence once (safe guard for multi-worker gunicorn)
+_startup_lock = os.path.join(os.path.dirname(__file__), '.startup_done')
+if not os.path.exists(_startup_lock):
+    try:
+        run_stock_data_updater_copy()
+        open(_startup_lock, 'w').close()
+    except Exception as e:
+        print(f"Startup sequence failed: {e}")
+
+# Start background threads (daily token refresh at 6AM IST)
+start_background_threads()
+
 if __name__ == "__main__":
-    run_stock_data_updater_copy();
+    # Keep main thread alive for direct runs
+    while True:
+        time.sleep(3600)
