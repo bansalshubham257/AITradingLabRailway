@@ -1492,19 +1492,6 @@ def get_instrument_keys():
         logging.error(f"Error fetching instrument keys: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# Run startup sequence once (safe guard for multi-worker gunicorn)
-_startup_lock = os.path.join(os.path.dirname(__file__), '.startup_done')
-if not os.path.exists(_startup_lock):
-    try:
-        run_stock_data_updater_copy()
-        open(_startup_lock, 'w').close()
-    except Exception as e:
-        print(f"Startup sequence failed: {e}")
-
-# Start background threads (daily token refresh at 6AM IST)
-start_background_threads()
-
 if __name__ == "__main__":
-    # Keep main thread alive for direct runs
-    while True:
-        time.sleep(3600)
+    run_stock_data_updater_copy()
+    print("Cron job completed, exiting.")
