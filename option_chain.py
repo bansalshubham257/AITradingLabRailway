@@ -312,6 +312,10 @@ class OptionChainService:
         """Return F&O stocks list with proper Yahoo Finance symbols"""
         return [f"{stock}.NS" for stock in self.fno_stocks.keys()]
 
+    def get_fno_stocks_without_ns(self):
+        """Return F&O stocks list with proper Yahoo Finance symbols"""
+        return [f"{stock}" for stock in self.fno_stocks.keys()]
+
     def _load_instruments_with_retry(self):
         """Load instruments data with retry logic"""
         for attempt in range(self.max_retries):
@@ -1874,8 +1878,8 @@ class OptionChainService:
 
             print(f"Combined {len(filtered_df)} instruments (including FNO equities)")
 
-            # Get current stock prices to filter strikes
-            stock_prices = self._get_current_market_prices()
+            # Get current stock prices from Upstox to filter strikes
+            stock_prices = self._get_current_market_prices_from_upstox()
             print(f"Fetched {len(stock_prices)} current stock prices for strike filtering")
 
             # Group instruments by stock symbol to process each stock separately
@@ -2155,17 +2159,92 @@ class OptionChainService:
 
         return prices
 
+    def _get_current_market_prices_from_upstox(self) -> Dict[str, float]:
+        """
+        Get current market prices for FNO stocks from Upstox LTP API.
+        Indices use hardcoded defaults for strike filtering.
+        Returns:
+            Dict[str, float]: Dictionary with symbol as key and price as value
+        """
+        prices = {}
+        try:
+            if self.instruments_data is None:
+                self._load_instruments_data()
+            if self.instruments_data is None:
+                print("Instruments data not available for price lookup")
+                return prices
+            fno_stock_names = set(self.fno_stocks.keys())
+            instrument_list = []  # (instrument_key, tradingsymbol, short_name)
+            # NSE_EQ for FNO stocks only
+            eq_df = self.instruments_data[
+                (self.instruments_data['exchange'] == 'NSE_EQ') &
+                (self.instruments_data['tradingsymbol'].isin(fno_stock_names))
+            ]
+            for _, row in eq_df.iterrows():
+                instrument_list.append((row['instrument_key'], row['tradingsymbol'], row['tradingsymbol']))
+            if not instrument_list:
+                print("No instruments found for Upstox price lookup")
+                return prices
+            access_token = self._get_access_token()
+            if not access_token:
+                print("No access token available for Upstox price lookup")
+                return prices
+            headers = {"Authorization": f"Bearer {access_token}"}
+            batch_size = 500
+            url = f"{self.UPSTOX_BASE_URL}/v2/market-quote/ltp"
+            for i in range(0, len(instrument_list), batch_size):
+                batch = instrument_list[i:i + batch_size]
+                params = {'instrument_key': ','.join([item[0] for item in batch])}
+                try:
+                    response = requests.get(url, headers=headers, params=params, timeout=10)
+                    response.raise_for_status()
+                    data = response.json().get("data", {})
+                    for instr_key, tsymbol, short_name in batch:
+                        response_key = f"NSE_EQ:{tsymbol}"
+                        quote = data.get(response_key) or data.get(instr_key, {})
+                        ltp = quote.get("last_price") if isinstance(quote, dict) else None
+                        if ltp:
+                            prices[short_name] = float(ltp)
+                except Exception as e:
+                    print(f"Error fetching price batch from Upstox: {e}")
+                time.sleep(0.3)
+            # Hardcoded fallback for indices
+            index_fallback = {
+                "NIFTY": 24600,
+                "BANKNIFTY": 54600,
+                "FINNIFTY": 26100,
+                "MIDCPNIFTY": 12627,
+                "SENSEX": 81193,
+                "BANKEX": 62250
+            }
+            for idx, val in index_fallback.items():
+                if idx not in prices:
+                    prices[idx] = val
+            prices = {k: v for k, v in prices.items() if v > 0}
+            print(f"Loaded {len(prices)} stock prices from Upstox + index defaults for strike filtering")
+        except Exception as e:
+            print(f"Error fetching current market prices from Upstox: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        return prices
     def _get_all_weekly_expiries(self):
         """Get all weekly expiries for the current month."""
+        """Get all weekly expiries for the current month."""
+        today = datetime.now()
         today = datetime.now()
         year, month = today.year, today.month
+        year, month = today.year, today.month
         num_days = monthrange(year, month)[1]  # Get the number of days in the current month
-
+        num_days = monthrange(year, month)[1]  # Get the number of days in the current month
+        expiries = []
         expiries = []
         for day in range(1, num_days + 1):
+        for day in range(1, num_days + 1):
+            date = datetime(year, month, day)
             date = datetime(year, month, day)
             if date.weekday() == 3:  # Thursday
+            if date.weekday() == 3:  # Thursday
                 expiries.append(date.strftime('%Y-%m-%d'))
-
+                expiries.append(date.strftime('%Y-%m-%d'))
         return expiries
 
