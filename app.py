@@ -7,7 +7,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 import pytz
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 import time
 from data_consolidation import run_consolidation_worker
@@ -808,26 +808,34 @@ def run_stock_data_updater():
 
 
 def run_stock_data_updater_copy():
-    """Clears instrument keys and re-fetches them with Upstox prices."""
+    """Startup: refresh Upstox token FIRST, then generate instrument keys (sequential)."""
 
-    # interval = '1d'
-    #
-    # # Configuration for batch processing
-    # stocks_per_worker = 20
-    # max_workers = 20  # Increase workers since we're only handling one interval
-    #
-    # print("Running stock data update for 1d interval only...")
-    #
-    # # Get FNO stocks
-    # fno_stocks = option_chain_service.get_fno_stocks_with_symbols()
-    #
-    # start_time = time.time()
-    # success_count = update_stocks_for_interval(fno_stocks, interval, stocks_per_worker, max_workers)
-    # total_time = time.time() - start_time
-    #
-    # print(f"✅ FNO stocks completed: {success_count} stocks in {total_time:.2f}s")
+    # Step 1: Refresh Upstox token synchronously (no token = feed/keygen will fail)
+    print("Starting token refresh before instrument key generation...")
+    from upstox_auth import playwright_auth_flow
+    try:
+        accounts = database_service.get_upstox_accounts()
+        for account in accounts:
+            api_key = account.get('api_key')
+            access_token = playwright_auth_flow(
+                api_key, account.get('api_secret'),
+                account.get('totp_secret'), account.get('redirect_uri'),
+                headless=True, username=account.get('username'),
+                password=account.get('password')
+            )
+            if access_token:
+                database_service.update_upstox_token(
+                    api_key,
+                    {'access_token': access_token, 'created_at': datetime.now().timestamp()}
+                )
+                print(f"Token refreshed for account {api_key}")
+    except Exception as e:
+        print(f"Token refresh failed at startup: {e}")
+        return  # Don't proceed with instrument keys if token refresh failed
+
+    # Step 2: Now safe to generate instrument keys (token is fresh)
+    print("Token refresh complete. Proceeding with instrument key generation...")
     database_service.clear_old_data()
-    print("Old Data  cleared successfully")
     run_instrument_keys_worker()
     print("instrument keys worker done")
     run_prev_close_worker()
@@ -1339,6 +1347,60 @@ def run_scanner_worker():
             print(f"Error in scanner worker: {e}")
             time.sleep(300)  # Retry after 5 minutes on error
 
+def run_daily_token_refresh():
+    """Background worker to refresh Upstox access token daily at 6 AM using Playwright."""
+    from upstox_auth import playwright_auth_flow
+
+    def refresh_token():
+        try:
+            accounts = database_service.get_upstox_accounts()
+            if not accounts:
+                print("No Upstox accounts found for token refresh")
+                return
+
+            for account in accounts:
+                api_key = account.get('api_key')
+                api_secret = account.get('api_secret')
+                totp_secret = account.get('totp_secret')
+                redirect_uri = account.get('redirect_uri')
+                username = account.get('username')
+                password = account.get('password')
+
+                if not all([api_key, api_secret, totp_secret, redirect_uri, username, password]):
+                    print(f"Skipping account {api_key}: missing credentials")
+                    continue
+
+                print(f"Refreshing token for account {api_key}...")
+                access_token = playwright_auth_flow(
+                    api_key, api_secret, totp_secret, redirect_uri,
+                    headless=True, username=username, password=password
+                )
+
+                if access_token:
+                    token_data = {'access_token': access_token, 'created_at': datetime.now().timestamp()}
+                    database_service.update_upstox_token(api_key, token_data)
+                    print(f"Token refreshed successfully for account {api_key}")
+                else:
+                    print(f"Token refresh failed for account {api_key}")
+        except Exception as e:
+            print(f"Error in token refresh: {e}")
+
+    # Run daily at 6 AM IST (initial refresh is handled by run_stock_data_updater_copy)
+    while True:
+        try:
+            ist = pytz.timezone('Asia/Kolkata')
+            now = datetime.now(ist)
+            target = now.replace(hour=6, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target = target + timedelta(days=1)
+            sleep_seconds = (target - now).total_seconds()
+            print(f"Next token refresh scheduled at {target.strftime('%Y-%m-%d %H:%M:%S')} IST")
+            time.sleep(sleep_seconds)
+            refresh_token()
+        except Exception as e:
+            print(f"Error in daily token refresh worker: {e}")
+            time.sleep(3600)
+
 def run_db_clearing_worker():
     """Background worker that runs during the configured window to clear old database entries."""
     run_stock_data_updater_copy()
@@ -1405,11 +1467,14 @@ def run_background_workers():
         daemon=True
     )
 
+    token_refresh_thread = threading.Thread(target=run_daily_token_refresh, daemon=True)
+
     #upstox_feed_thread.start()
 
     #option_chain_thread.start()
     #oi_buildup_thread.start()
     stock_data_thread.start()
+    token_refresh_thread.start()
     #financials_thread.start()
     #db_clearing_thread.start()
     #instrument_keys_thread.start()

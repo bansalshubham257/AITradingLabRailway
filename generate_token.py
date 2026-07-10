@@ -20,7 +20,7 @@ import os
 import getpass
 import sys
 from datetime import datetime
-from upstox_auth import automated_auth_flow, manual_auth_flow, fully_automated_auth_flow
+from upstox_auth import automated_auth_flow, manual_auth_flow, fully_automated_auth_flow, playwright_auth_flow
 from dotenv import load_dotenv
 from config import Config
 from database import DatabaseService
@@ -59,7 +59,7 @@ def add_account():
         print("Failed to save account.")
         return False
 
-def generate_token_for_account(account, headless=True, manual=False):
+def generate_token_for_account(account, headless=True, manual=False, use_playwright=False):
     """Generate a token for a specific account"""
     api_key = account.get('api_key')
     api_secret = account.get('api_secret')
@@ -74,8 +74,13 @@ def generate_token_for_account(account, headless=True, manual=False):
 
     print(f"Generating token for account {api_key}")
 
-    # Check if using manual flow
-    if manual:
+    if use_playwright:
+        print(f"Using Playwright automated flow for account {api_key}")
+        access_token = playwright_auth_flow(
+            api_key, api_secret, totp_secret, redirect_uri,
+            headless=headless, username=username, password=password
+        )
+    elif manual:
         print(f"Using manual flow for account {api_key}")
         access_token = manual_auth_flow(api_key, api_secret, totp_secret, redirect_uri)
     else:
@@ -115,6 +120,7 @@ def main():
     parser = argparse.ArgumentParser(description='Generate Upstox access tokens for multiple accounts')
     parser.add_argument('--visible', action='store_true', help='Run browser in visible mode (for debugging)')
     parser.add_argument('--manual', action='store_true', help='Use manual flow instead of automated')
+    parser.add_argument('--playwright', action='store_true', help='Use Playwright instead of Selenium')
     parser.add_argument('--add-account', action='store_true', help='Add a new Upstox account to the database')
     args = parser.parse_args()
 
@@ -141,7 +147,7 @@ def main():
     # Generate tokens for each account
     success_count = 0
     for account in accounts:
-        if generate_token_for_account(account, headless=not args.visible, manual=args.manual):
+        if generate_token_for_account(account, headless=not args.visible, manual=args.manual, use_playwright=args.playwright):
             success_count += 1
 
     # Log summary

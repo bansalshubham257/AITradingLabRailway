@@ -599,6 +599,122 @@ def fully_automated_auth_flow(api_key, secret, totp_secret, redirect_uri,
             driver.quit()
         return None
 
+def playwright_auth_flow(api_key, secret, totp_secret, redirect_uri,
+                          headless=True, username=None, password=None):
+    """
+    Run a fully automated authentication flow using Playwright (no Selenium/Chrome needed).
+    Playwright bundles its own Chromium browser.
+
+    Args:
+        api_key (str): Upstox API key
+        secret (str): Upstox API secret
+        totp_secret (str): TOTP secret for 2FA
+        redirect_uri (str): Redirect URI registered with Upstox
+        headless (bool): Whether to run browser in headless mode
+        username (str): Upstox username/mobile number
+        password (str): Upstox password
+
+    Returns:
+        str: Access token if successful, None otherwise
+    """
+    auth = UpstoxAuth(api_key, secret, totp_secret, redirect_uri)
+
+    # Start the local server to catch the redirect
+    server = auth.start_auth_server()
+    if not server:
+        print("Failed to start local server. Cannot proceed with authentication.")
+        return None
+
+    # Generate auth URL and TOTP code
+    auth_url = auth.get_auth_url()
+    totp_code = auth.generate_totp()
+
+    print("\n=== Upstox Playwright Authentication Flow ===")
+
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=headless)
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+            page = context.new_page()
+            print("Launching browser...")
+
+            # Navigate to auth URL
+            page.goto(auth_url, wait_until='networkidle')
+            print("Navigated to Upstox authorization page")
+
+            if username and password:
+                print("Entering username/mobile number...")
+                page.fill("#mobileNum", username)
+                page.click("#getOtp")
+                page.wait_for_timeout(2000)
+
+                print(f"Entering TOTP code: {totp_code}")
+                page.fill("#otpNum", totp_code)
+                page.click("#continueBtn")
+                page.wait_for_timeout(2000)
+
+                print("Entering password...")
+                page.fill("#pinCode", password)
+                page.click("#pinContinueBtn")
+                page.wait_for_timeout(2000)
+
+            # Wait for redirect with auth code
+            print("Waiting for authorization code...")
+            timeout = 120
+            start_time = time.time()
+            auth_code = None
+
+            while time.time() - start_time < timeout:
+                current_url = page.url
+                if 'code=' in current_url:
+                    parsed = urlparse(current_url)
+                    params = parse_qs(parsed.query)
+                    auth_code = params['code'][0]
+                    print(f"Authorization code received: {auth_code}")
+                    break
+                page.wait_for_timeout(1000)
+
+            browser.close()
+
+        if not auth_code:
+            print("Authentication timed out.")
+            auth.stop_auth_server(server)
+            return None
+
+        auth.stop_auth_server(server)
+
+        # Get access token using the auth code
+        token_data = auth.get_access_token(auth_code)
+        if token_data and 'access_token' in token_data:
+            print("\nAuthentication successful!")
+            access_token = token_data['access_token']
+
+            user_data = auth.verify_token(access_token)
+            if user_data and 'data' in user_data:
+                print(f"Logged in as: {user_data.get('data', {}).get('user_name', 'Unknown')}")
+
+            if 'expires_in' in token_data:
+                hours = token_data['expires_in'] // 3600
+                print(f"Token will expire in: {hours} hours")
+
+            return access_token
+
+        return None
+
+    except ImportError:
+        print("Playwright not installed. Install it with: pip install playwright && playwright install chromium")
+        return None
+    except Exception as e:
+        print(f"Error in Playwright authentication: {str(e)}")
+        if 'server' in locals() and server:
+            auth.stop_auth_server(server)
+        return None
+
+
 if __name__ == "__main__":
     # This will be executed when running this file directly
     # Import credentials from config if available, otherwise use placeholders
