@@ -2227,10 +2227,9 @@ class OptionChainService:
             import traceback
             traceback.print_exc()
         return prices
+
     def _get_all_weekly_expiries(self):
         """Get all weekly expiries for the current month."""
-        """Get all weekly expiries for the current month."""
-        today = datetime.now()
         today = datetime.now()
         year, month = today.year, today.month
         num_days = monthrange(year, month)[1]  # Get the number of days in the current month
