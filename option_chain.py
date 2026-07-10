@@ -2233,18 +2233,11 @@ class OptionChainService:
         today = datetime.now()
         today = datetime.now()
         year, month = today.year, today.month
-        year, month = today.year, today.month
-        num_days = monthrange(year, month)[1]  # Get the number of days in the current month
         num_days = monthrange(year, month)[1]  # Get the number of days in the current month
         expiries = []
-        expiries = []
-        for day in range(1, num_days + 1):
         for day in range(1, num_days + 1):
             date = datetime(year, month, day)
-            date = datetime(year, month, day)
             if date.weekday() == 3:  # Thursday
-            if date.weekday() == 3:  # Thursday
-                expiries.append(date.strftime('%Y-%m-%d'))
                 expiries.append(date.strftime('%Y-%m-%d'))
         return expiries
 
