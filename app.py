@@ -808,24 +808,24 @@ def run_stock_data_updater():
 
 
 def run_stock_data_updater_copy():
-    """Optimized stock data updater that only processes 1d interval"""
+    """Clears instrument keys and re-fetches them with Upstox prices."""
 
-    interval = '1d'
-
-    # Configuration for batch processing
-    stocks_per_worker = 20
-    max_workers = 20  # Increase workers since we're only handling one interval
-
-    print("Running stock data update for 1d interval only...")
-
-    # Get FNO stocks
-    fno_stocks = option_chain_service.get_fno_stocks_with_symbols()
-
-    start_time = time.time()
-    success_count = update_stocks_for_interval(fno_stocks, interval, stocks_per_worker, max_workers)
-    total_time = time.time() - start_time
-
-    print(f"✅ FNO stocks completed: {success_count} stocks in {total_time:.2f}s")
+    # interval = '1d'
+    #
+    # # Configuration for batch processing
+    # stocks_per_worker = 20
+    # max_workers = 20  # Increase workers since we're only handling one interval
+    #
+    # print("Running stock data update for 1d interval only...")
+    #
+    # # Get FNO stocks
+    # fno_stocks = option_chain_service.get_fno_stocks_with_symbols()
+    #
+    # start_time = time.time()
+    # success_count = update_stocks_for_interval(fno_stocks, interval, stocks_per_worker, max_workers)
+    # total_time = time.time() - start_time
+    #
+    # print(f"✅ FNO stocks completed: {success_count} stocks in {total_time:.2f}s")
     database_service.clear_old_data()
     print("Old Data  cleared successfully")
     run_instrument_keys_worker()
