@@ -46,8 +46,8 @@ db_service = DatabaseService()
 def get_market_data_feed_authorize_v3():
     """Get authorization for market data feed."""
     # Fetch access token from the database with ID=4 instead of using Config
-    access_token = db_service.get_access_token(account_id=4)
-    print(f"Using access token ending with ...{access_token[-4:]} from database (ID=4)")
+    access_token = db_service.get_access_token(account_id=5)
+    print(f"Using access token ending with ...{access_token[-4:]} from database (ID=5)")
 
     # Check if a connection with this token already exists and needs to be closed
     if access_token in active_websocket_connections:
